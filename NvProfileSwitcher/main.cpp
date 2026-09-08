@@ -61,6 +61,8 @@ struct Settings {
     std::vector<GameProfile> desktopProfiles;
     std::vector<GameProfile> profiles;
     bool startWindows=false, startMinimized=false, minimizeToTray=false, checkUpdates=true;
+    // Application-wide reset hotkey in canonical text form; empty = unbound (the default).
+    std::wstring resetHotkey;
 };
 
 constexpr COLORREF C_BACK=RGB(10,13,16), C_PANEL=RGB(18,22,26), C_PANEL2=RGB(24,29,34), C_FIELD=RGB(20,24,28), C_BORDER=RGB(45,52,59);
@@ -330,7 +332,8 @@ void Save(){
 
     f<<"  ],\n  \"StartWithWindows\": "<<(gSettings.startWindows?"true":"false")
      <<",\n  \"StartMinimized\": "<<(gSettings.startMinimized?"true":"false")
-     <<",\n  \"MinimizeToTray\": "<<(gSettings.minimizeToTray?"true":"false")<<",\n  \"CheckForUpdates\": "<<(gSettings.checkUpdates?"true":"false")<<"\n}\n";
+     <<",\n  \"MinimizeToTray\": "<<(gSettings.minimizeToTray?"true":"false")<<",\n  \"CheckForUpdates\": "<<(gSettings.checkUpdates?"true":"false")
+     <<",\n  \"ResetHotkey\": \""<<Escape(gSettings.resetHotkey)<<"\"\n}\n";
 }
 void Load(){
     std::string s=ReadAll(AppDataFile());
@@ -339,6 +342,7 @@ void Load(){
     gSettings.startMinimized=FieldB(s,"StartMinimized",false);
     gSettings.minimizeToTray=FieldB(s,"MinimizeToTray",false);
     gSettings.checkUpdates=FieldB(s,"CheckForUpdates",true);
+    gSettings.resetHotkey=Unescape(FieldS(s,"ResetHotkey",""));
 
     size_t wp=s.find("\"Windows Profiles\"");
     if(wp!=std::string::npos){
@@ -662,8 +666,9 @@ void CheckProcesses(){
 // set is re-registered after any profile change. A binding Windows rejects, or
 // one that does not parse, is remembered as unavailable; it stays saved and is
 // retried on the next re-registration.
-struct RegisteredHotkey{int id; std::wstring profileName; bool registered;};
+struct RegisteredHotkey{int id; std::wstring profileName; bool registered;}; // profileName empty = reset hotkey
 std::vector<RegisteredHotkey> gHotkeys;
+constexpr int RESET_HOTKEY_ID=99;
 constexpr int HOTKEY_ID_BASE=100;
 void UnregisterAllHotkeys(){
     for(const auto& h:gHotkeys) if(h.registered) UnregisterHotKey(gWnd,h.id);
@@ -672,6 +677,13 @@ void UnregisterAllHotkeys(){
 void RegisterAllHotkeys(){
     if(!gWnd) return;
     UnregisterAllHotkeys();
+    if(!gSettings.resetHotkey.empty()){
+        bool ok=false;
+        if(auto hk=hotkey::Parse(gSettings.resetHotkey)){
+            ok=RegisterHotKey(gWnd,RESET_HOTKEY_ID,hk->modifiers|MOD_NOREPEAT,hk->key)!=0;
+        }
+        gHotkeys.push_back({RESET_HOTKEY_ID,L"",ok});
+    }
     int id=HOTKEY_ID_BASE;
     for(const auto& p:gSettings.profiles){
         if(!p.enabled||p.hotkey.empty()) continue;
@@ -693,7 +705,11 @@ bool AnyHotkeyUnavailable(){
     return false;
 }
 bool HotkeyUnavailable(const std::wstring& profileName){
-    for(const auto& h:gHotkeys) if(h.profileName==profileName) return !h.registered;
+    for(const auto& h:gHotkeys) if(h.id!=RESET_HOTKEY_ID&&h.profileName==profileName) return !h.registered;
+    return false;
+}
+bool ResetHotkeyUnavailable(){
+    if(const auto* h=HotkeyById(RESET_HOTKEY_ID)) return !h->registered;
     return false;
 }
 // Persist profiles, re-register hotkeys, and let the switching module react
@@ -2173,7 +2189,7 @@ case IDC_FOOT_ABOUT:ShowAbout();break;
 case ID_TRAY_OPEN:ShowMain();break;case ID_TRAY_CHECK_UPDATE:{if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,(LPVOID)1,0,nullptr))CloseHandle(h);break;}case ID_TRAY_ABOUT:ShowAbout();break;case ID_TRAY_EXIT:gReallyExit=true;DestroyWindow(w);break;}return 0;}case WM_CLOSE:
     gReallyExit=true;
     DestroyWindow(w);
-    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_HOTKEY:{if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileName));return 0;}
+    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_HOTKEY:{if((int)wp==RESET_HOTKEY_ID)DispatchSwitching(switching::Event::ResetHotkeyPressed());else if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileName));return 0;}
 case WM_DESTROY:UnregisterAllHotkeys();KillTimer(w,1);SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
 
 int WINAPI wWinMain(HINSTANCE h,HINSTANCE,LPWSTR cmd,int){

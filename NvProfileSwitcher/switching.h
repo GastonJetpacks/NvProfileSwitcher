@@ -46,6 +46,7 @@ struct Event {
         Startup,           // application launched
         ForegroundChanged, // `value` is the foreground process basename (may be empty)
         HotkeyPressed,     // `value` is the profile whose hotkey trigger fired
+        ResetHotkeyPressed,// the application-wide reset hotkey fired
         ProfilesChanged,   // a profile was saved, added, removed, enabled or disabled
     };
     Kind kind;
@@ -58,6 +59,7 @@ struct Event {
     static Event HotkeyPressed(std::wstring profileName) {
         return {Kind::HotkeyPressed, std::move(profileName)};
     }
+    static Event ResetHotkeyPressed() { return {Kind::ResetHotkeyPressed, {}}; }
     static Event ProfilesChanged() { return {Kind::ProfilesChanged, {}}; }
 };
 

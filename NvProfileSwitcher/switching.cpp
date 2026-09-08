@@ -82,6 +82,12 @@ Decision Decide(const State& current, const std::vector<ProfileInfo>& profiles, 
         d.state.overrideActive = true;
         return d;
     }
+    case Event::Kind::ResetHotkeyPressed: {
+        // Back to the Windows profile; automatic switching resumes on the next
+        // foreground event. Nothing to do if Windows is already active and no
+        // override is in place.
+        return EndOverride(current);
+    }
     case Event::Kind::ProfilesChanged: {
         // If the pinned profile was disabled or removed, the override ends so
         // the user is never stuck on colours they can no longer see or edit.

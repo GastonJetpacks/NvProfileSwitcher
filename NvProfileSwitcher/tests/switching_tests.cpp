@@ -184,6 +184,45 @@ static void ForegroundChangeDuringOverrideIsIgnored() {
     CHECK(e.action.kind == ActionKind::None);
 }
 
+static void ResetHotkeyEndsOverrideAndRestoresWindows() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::ResetHotkeyPressed());
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::RestoreWindows);
+}
+
+static void ResetHotkeyWhenWindowsAlreadyActiveDoesNothing() {
+    Decision d = Decide(Windows(), Profiles(), Event::ResetHotkeyPressed());
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
+static void ResetHotkeyDuringAutomaticSwitchingRestoresWindows() {
+    // Not an override, but the user asked for Windows colours: honour it. The
+    // next foreground event decides whether the game profile comes back.
+    Decision d = Decide(Active(L"Doom"), Profiles(), Event::ResetHotkeyPressed());
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::RestoreWindows);
+}
+
+static void ResetHotkeyThenForegroundGameReappliesItsProfile() {
+    Decision reset = Decide(Override(L"Doom"), Profiles(), Event::ResetHotkeyPressed());
+    Decision next = Decide(reset.state, Profiles(), Event::ForegroundChanged(L"doom"));
+    CHECK(next.state.activeProfile == L"Doom");
+    CHECK(next.state.overrideActive == false);
+    CHECK(next.action.kind == ActionKind::ApplyProfile);
+    CHECK(next.action.profile == L"Doom");
+}
+
+static void ResetHotkeyThenForegroundDesktopStaysOnWindows() {
+    Decision reset = Decide(Override(L"Doom"), Profiles(), Event::ResetHotkeyPressed());
+    Decision next = Decide(reset.state, Profiles(), Event::ForegroundChanged(L"explorer"));
+    CHECK(next.state.activeProfile == L"Windows");
+    CHECK(next.action.kind == ActionKind::None);
+}
+
 static void ProfilesChangedEndsOverrideWhenPinnedProfileDisabled() {
     std::vector<ProfileInfo> profiles = Profiles();
     profiles[0].enabled = false; // Doom
@@ -240,6 +279,11 @@ int main() {
     HotkeyForUnknownProfileDoesNothing();
     HotkeyWorksForProfileWithoutExecutable();
     ForegroundChangeDuringOverrideIsIgnored();
+    ResetHotkeyEndsOverrideAndRestoresWindows();
+    ResetHotkeyWhenWindowsAlreadyActiveDoesNothing();
+    ResetHotkeyDuringAutomaticSwitchingRestoresWindows();
+    ResetHotkeyThenForegroundGameReappliesItsProfile();
+    ResetHotkeyThenForegroundDesktopStaysOnWindows();
     ProfilesChangedEndsOverrideWhenPinnedProfileDisabled();
     ProfilesChangedEndsOverrideWhenPinnedProfileRemoved();
     ProfilesChangedKeepsOverrideWhenPinnedProfileStillEnabled();
