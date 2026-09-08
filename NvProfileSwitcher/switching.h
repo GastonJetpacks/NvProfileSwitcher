@@ -45,6 +45,8 @@ struct Event {
     enum class Kind {
         Startup,           // application launched
         ForegroundChanged, // `value` is the foreground process basename (may be empty)
+        HotkeyPressed,     // `value` is the profile whose hotkey trigger fired
+        ProfilesChanged,   // a profile was saved, added, removed, enabled or disabled
     };
     Kind kind;
     std::wstring value;
@@ -53,6 +55,10 @@ struct Event {
     static Event ForegroundChanged(std::wstring exeBasename) {
         return {Kind::ForegroundChanged, std::move(exeBasename)};
     }
+    static Event HotkeyPressed(std::wstring profileName) {
+        return {Kind::HotkeyPressed, std::move(profileName)};
+    }
+    static Event ProfilesChanged() { return {Kind::ProfilesChanged, {}}; }
 };
 
 struct Decision {

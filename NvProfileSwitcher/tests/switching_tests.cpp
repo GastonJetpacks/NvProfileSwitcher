@@ -1,23 +1,18 @@
-// Console tests for the switching decision module. No framework: each CHECK
-// records a failure and the process exits non-zero if any failed.
+// Console tests for the pure modules (switching decision, hotkey text).
+// No framework: each CHECK records a failure and the process exits non-zero
+// if any failed.
 #include "../switching.h"
+#include "test_check.h"
 #include <cstdio>
 #include <string>
 #include <vector>
 
+int gFailures = 0;
+int gChecks = 0;
+
+void RunHotkeyTests(); // hotkey_tests.cpp
+
 using namespace switching;
-
-static int gFailures = 0;
-static int gChecks = 0;
-
-#define CHECK(cond)                                                                 \
-    do {                                                                            \
-        ++gChecks;                                                                  \
-        if (!(cond)) {                                                              \
-            ++gFailures;                                                            \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);            \
-        }                                                                           \
-    } while (0)
 
 static std::vector<ProfileInfo> Profiles() {
     return {
@@ -30,9 +25,19 @@ static std::vector<ProfileInfo> Profiles() {
 
 static State Windows() { return State{}; }
 static State Active(const wchar_t* name) { return State{name, false}; }
+static State Override(const wchar_t* name) { return State{name, true}; }
+
+// --- Automatic switching -------------------------------------------------
 
 static void StartupRestoresWindows() {
     Decision d = Decide(Active(L"Doom"), Profiles(), Event::Startup());
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::RestoreWindows);
+}
+
+static void StartupClearsOverride() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::Startup());
     CHECK(d.state.activeProfile == L"Windows");
     CHECK(d.state.overrideActive == false);
     CHECK(d.action.kind == ActionKind::RestoreWindows);
@@ -113,8 +118,108 @@ static void SameExecutableIgnoresCase() {
     CHECK(SameExecutable(L"", L""));
 }
 
+// --- Hotkey triggers and override (ADR 0001) -----------------------------
+
+static void HotkeyAppliesProfileAndStartsOverride() {
+    Decision d = Decide(Windows(), Profiles(), Event::HotkeyPressed(L"Doom"));
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::ApplyProfile);
+    CHECK(d.action.profile == L"Doom");
+}
+
+static void HotkeyForAlreadyActiveProfilePinsWithoutReapplying() {
+    // Profile became active through its executable trigger; the hotkey pins it.
+    Decision d = Decide(Active(L"Doom"), Profiles(), Event::HotkeyPressed(L"Doom"));
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
+static void HotkeyForPinnedProfileIsNoOpNotToggle() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::HotkeyPressed(L"Doom"));
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
+static void HotkeySwitchesToAnotherProfileKeepingOverride() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::HotkeyPressed(L"Elden Ring"));
+    CHECK(d.state.activeProfile == L"Elden Ring");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::ApplyProfile);
+    CHECK(d.action.profile == L"Elden Ring");
+}
+
+static void HotkeyForDisabledProfileDoesNothing() {
+    Decision d = Decide(Windows(), Profiles(), Event::HotkeyPressed(L"Disabled Game"));
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
+static void HotkeyForUnknownProfileDoesNothing() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::HotkeyPressed(L"Nope"));
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
+static void HotkeyWorksForProfileWithoutExecutable() {
+    Decision d = Decide(Windows(), Profiles(), Event::HotkeyPressed(L"No Exe"));
+    CHECK(d.state.activeProfile == L"No Exe");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::ApplyProfile);
+}
+
+static void ForegroundChangeDuringOverrideIsIgnored() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::ForegroundChanged(L"eldenring"));
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::None);
+
+    Decision e = Decide(Override(L"Doom"), Profiles(), Event::ForegroundChanged(L""));
+    CHECK(e.state.activeProfile == L"Doom");
+    CHECK(e.state.overrideActive == true);
+    CHECK(e.action.kind == ActionKind::None);
+}
+
+static void ProfilesChangedEndsOverrideWhenPinnedProfileDisabled() {
+    std::vector<ProfileInfo> profiles = Profiles();
+    profiles[0].enabled = false; // Doom
+    Decision d = Decide(Override(L"Doom"), profiles, Event::ProfilesChanged());
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::RestoreWindows);
+}
+
+static void ProfilesChangedEndsOverrideWhenPinnedProfileRemoved() {
+    std::vector<ProfileInfo> profiles = {{L"Elden Ring", L"eldenring", true}};
+    Decision d = Decide(Override(L"Doom"), profiles, Event::ProfilesChanged());
+    CHECK(d.state.activeProfile == L"Windows");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::RestoreWindows);
+}
+
+static void ProfilesChangedKeepsOverrideWhenPinnedProfileStillEnabled() {
+    Decision d = Decide(Override(L"Doom"), Profiles(), Event::ProfilesChanged());
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == true);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
+static void ProfilesChangedWithoutOverrideIsNoChange() {
+    std::vector<ProfileInfo> profiles = Profiles();
+    profiles[0].enabled = false;
+    Decision d = Decide(Active(L"Doom"), profiles, Event::ProfilesChanged());
+    CHECK(d.state.activeProfile == L"Doom");
+    CHECK(d.state.overrideActive == false);
+    CHECK(d.action.kind == ActionKind::None);
+}
+
 int main() {
     StartupRestoresWindows();
+    StartupClearsOverride();
     ForegroundMatchAppliesProfile();
     ForegroundMatchIsCaseInsensitive();
     ForegroundLeavingProfileRestoresWindows();
@@ -126,6 +231,21 @@ int main() {
     NoActionWhenWindowsAlreadyActiveAndNothingMatches();
     FirstMatchingProfileWins();
     SameExecutableIgnoresCase();
+
+    HotkeyAppliesProfileAndStartsOverride();
+    HotkeyForAlreadyActiveProfilePinsWithoutReapplying();
+    HotkeyForPinnedProfileIsNoOpNotToggle();
+    HotkeySwitchesToAnotherProfileKeepingOverride();
+    HotkeyForDisabledProfileDoesNothing();
+    HotkeyForUnknownProfileDoesNothing();
+    HotkeyWorksForProfileWithoutExecutable();
+    ForegroundChangeDuringOverrideIsIgnored();
+    ProfilesChangedEndsOverrideWhenPinnedProfileDisabled();
+    ProfilesChangedEndsOverrideWhenPinnedProfileRemoved();
+    ProfilesChangedKeepsOverrideWhenPinnedProfileStillEnabled();
+    ProfilesChangedWithoutOverrideIsNoChange();
+
+    RunHotkeyTests();
 
     if (gFailures) {
         std::printf("%d of %d checks failed\n", gFailures, gChecks);

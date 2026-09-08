@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- Hotkey triggers. A profile can carry a global key combination (`"Hotkey": "Ctrl+Alt+1"` in `profiles.json`; a modifier is optional). Pressing it applies the profile to all displays and starts an **override**: executable triggers are ignored until the application restarts. Pressing the active profile's own hotkey does nothing; pressing another profile's hotkey switches to it. Disabling or removing the pinned profile ends the override.
+- The footer now shows the active profile, with **(hotkey)** while an override is in place, and a warning when a hotkey could not be registered because another application owns it.
+
 ### Changed
 
 - This fork now identifies itself as `GastonJetpacks/NvProfileSwitcher`: the footer GitHub link, the About dialog, the update checker, and the installer URLs point at this repository instead of upstream.

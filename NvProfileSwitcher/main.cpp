@@ -21,6 +21,7 @@
 #include "resource.h"
 #include "version.h"
 #include "switching.h"
+#include "hotkey.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -52,6 +53,8 @@ struct GameProfile {
     double brightness=100.0, contrast=100.0, gamma=1.00;
     bool enabled=true;
     std::vector<DisplayProfileValues> displayProfiles;
+    // Hotkey trigger in canonical text form (see hotkey.h); empty = unbound.
+    std::wstring hotkey;
 };
 struct Settings {
     GameProfile desktop{L"Windows",L"",L"",50,0,100.0,100.0,1.00,true}; // default values for new Windows monitor profiles
@@ -187,6 +190,7 @@ GameProfile ParseProfile(const std::string&o){
     p.contrast=FieldN(o,"Contrast",100.0);
     p.gamma=FieldN(o,"Gamma",1.0);
     p.enabled=FieldB(o,"Enabled",true);
+    p.hotkey=Unescape(FieldS(o,"Hotkey",""));
 
     size_t dp=o.find("\"Display Profiles\"");
     if(dp!=std::string::npos){
@@ -311,6 +315,7 @@ void Save(){
          <<"      \"DigitalVibrance\": "<<p.vibrance<<",\n"
          <<"      \"Hue\": "<<p.hue<<",\n"
          <<"      \"Enabled\": "<<(p.enabled?"true":"false")<<",\n"
+         <<"      \"Hotkey\": \""<<Escape(p.hotkey)<<"\",\n"
          <<"      \"Display Profiles\": [\n";
         for(size_t j=0;j<p.displayProfiles.size();++j){
             dumpDisplay(p.displayProfiles[j],8);
@@ -651,6 +656,53 @@ void DispatchSwitching(const switching::Event& e){
 void CheckProcesses(){
     DispatchSwitching(switching::Event::ForegroundChanged(ForegroundProcessName()));
 }
+
+// Hotkey trigger registration. Every enabled profile with a binding is
+// registered with RegisterHotKey (never a low-level keyboard hook). The whole
+// set is re-registered after any profile change. A binding Windows rejects, or
+// one that does not parse, is remembered as unavailable; it stays saved and is
+// retried on the next re-registration.
+struct RegisteredHotkey{int id; std::wstring profileName; bool registered;};
+std::vector<RegisteredHotkey> gHotkeys;
+constexpr int HOTKEY_ID_BASE=100;
+void UnregisterAllHotkeys(){
+    for(const auto& h:gHotkeys) if(h.registered) UnregisterHotKey(gWnd,h.id);
+    gHotkeys.clear();
+}
+void RegisterAllHotkeys(){
+    if(!gWnd) return;
+    UnregisterAllHotkeys();
+    int id=HOTKEY_ID_BASE;
+    for(const auto& p:gSettings.profiles){
+        if(!p.enabled||p.hotkey.empty()) continue;
+        bool ok=false;
+        if(auto hk=hotkey::Parse(p.hotkey)){
+            ok=RegisterHotKey(gWnd,id,hk->modifiers|MOD_NOREPEAT,hk->key)!=0;
+        }
+        gHotkeys.push_back({id,p.name,ok});
+        ++id;
+    }
+    InvalidateRect(gWnd,nullptr,FALSE);
+}
+const RegisteredHotkey* HotkeyById(int id){
+    for(const auto& h:gHotkeys) if(h.id==id) return &h;
+    return nullptr;
+}
+bool AnyHotkeyUnavailable(){
+    for(const auto& h:gHotkeys) if(!h.registered) return true;
+    return false;
+}
+bool HotkeyUnavailable(const std::wstring& profileName){
+    for(const auto& h:gHotkeys) if(h.profileName==profileName) return !h.registered;
+    return false;
+}
+// Persist profiles, re-register hotkeys, and let the switching module react
+// (for example ending an override whose profile was disabled or removed).
+void CommitProfileChanges(){
+    Save();
+    RegisterAllHotkeys();
+    DispatchSwitching(switching::Event::ProfilesChanged());
+}
 void SetStartup(bool on){
     HKEY k;
     if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,nullptr,0,KEY_SET_VALUE,nullptr,&k,nullptr)==ERROR_SUCCESS){
@@ -819,7 +871,7 @@ void SaveSelected(){
         Save();
         RefreshList();
         Apply(*p);
-        gSwitching.activeProfile=switching::kWindowsProfileName;
+        if(!gSwitching.overrideActive) gSwitching.activeProfile=switching::kWindowsProfileName;
         return;
     }
 
@@ -846,13 +898,16 @@ void SaveSelected(){
         p->gamma=v->gamma;
     }
 
-    Save();
+    CommitProfileChanges();
     RefreshList();
 
-    std::wstring fg=ForegroundProcessName();
-    if(!p->exePath.empty()&&_wcsicmp(ProcessName(p->exePath).c_str(),fg.c_str())==0){
+    if(p->name==gSwitching.activeProfile){
+        // The active profile's values changed: show them now.
         ApplyGameProfile(*p);
-        gSwitching.activeProfile=p->name;
+    }else{
+        // Let automatic switching pick the profile up if its executable is
+        // already in the foreground (no effect during an override).
+        DispatchSwitching(switching::Event::ForegroundChanged(ForegroundProcessName()));
     }
 }
 HICON LoadExeIcon(const std::wstring& path){
@@ -1154,7 +1209,21 @@ void DrawSliderIcon(HDC dc,Gdiplus::Image* image,int x,int y){
 
 
 void DrawLabel(HDC dc,const wchar_t*t,int x,int y,COLORREF c,HFONT f=nullptr){ SetBkMode(dc,TRANSPARENT);SetTextColor(dc,c);SelectObject(dc,f?f:gFont);TextOutW(dc,x,y,t,(int)wcslen(t)); }
-void Fill(HDC dc,int x,int y,int w,int h,COLORREF c){HBRUSH b=CreateSolidBrush(c);RECT r{x,y,x+w,y+h};FillRect(dc,&r,b);DeleteObject(b);} 
+void Fill(HDC dc,int x,int y,int w,int h,COLORREF c){HBRUSH b=CreateSolidBrush(c);RECT r{x,y,x+w,y+h};FillRect(dc,&r,b);DeleteObject(b);}
+// Shorten text with an ellipsis so it fits in maxW pixels using the DC's current font.
+std::wstring FitText(HDC dc,const std::wstring& s,int maxW){
+    if(maxW<=0) return {};
+    SIZE sz{};GetTextExtentPoint32W(dc,s.c_str(),(int)s.size(),&sz);
+    if(sz.cx<=maxW) return s;
+    std::wstring t=s;
+    while(!t.empty()){
+        t.pop_back();
+        std::wstring c=t+L"\x2026";
+        GetTextExtentPoint32W(dc,c.c_str(),(int)c.size(),&sz);
+        if(sz.cx<=maxW) return c;
+    }
+    return {};
+} 
 
 
 void DrawProfilesPrototypeIcon(HDC dc,int x,int y){
@@ -1432,6 +1501,34 @@ void Paint(HWND w){
     int versionDividerX=driverTextX+driverLabel.cx+8+driverVersionSize.cx+16;
     Fill(dc,versionDividerX,footerY+1,1,14,C_BORDER);
     DrawLabel(dc,footerVersion.c_str(),versionDividerX+14,footerY,C_MUTED,gFont);
+
+    // Active profile indicator: "Active <name>", with "(hotkey)" while an
+    // override is in place and a warning while any hotkey failed to register.
+    {
+        SIZE versionSize{};SelectObject(dc,gFont);
+        GetTextExtentPoint32W(dc,footerVersion.c_str(),(int)footerVersion.size(),&versionSize);
+        int x=versionDividerX+14+versionSize.cx+16;
+        const int linksLeft=rc.right-284-16; // footer link buttons start at rc.right-284
+        Fill(dc,x,footerY+1,1,14,C_BORDER);
+        x+=14;
+        DrawLabel(dc,L"Active",x,footerY,C_MUTED,gFont);
+        SIZE activeLabel{};GetTextExtentPoint32W(dc,L"Active",6,&activeLabel);
+        x+=activeLabel.cx+8;
+
+        const std::wstring suffix=gSwitching.overrideActive?L" (hotkey)":L"";
+        const std::wstring warn=AnyHotkeyUnavailable()?L"hotkey unavailable":L"";
+        SIZE suffixSize{},warnSize{};
+        GetTextExtentPoint32W(dc,suffix.c_str(),(int)suffix.size(),&suffixSize);
+        GetTextExtentPoint32W(dc,warn.c_str(),(int)warn.size(),&warnSize);
+        const int reserved=suffixSize.cx+(warn.empty()?0:warnSize.cx+12);
+
+        std::wstring name=FitText(dc,gSwitching.activeProfile,linksLeft-x-reserved);
+        DrawLabel(dc,name.c_str(),x,footerY,C_TEXT,gFont);
+        SIZE nameSize{};GetTextExtentPoint32W(dc,name.c_str(),(int)name.size(),&nameSize);
+        x+=nameSize.cx;
+        if(!suffix.empty()){DrawLabel(dc,suffix.c_str(),x,footerY,C_ACCENT,gFont);x+=suffixSize.cx;}
+        if(!warn.empty()) DrawLabel(dc,warn.c_str(),x+12,footerY,C_DANGER,gFont);
+    }
 
     EndPaint(w,&ps);
 }
@@ -2065,7 +2162,7 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         return TRUE;
     }
     break;
-}case WM_HSCROLL:UpdateSliderLabels();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;case IDC_ADD:{GameProfile np{};if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();Save();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);Save();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
+}case WM_HSCROLL:UpdateSliderLabels();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;case IDC_ADD:{GameProfile np{};if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();CommitProfileChanges();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);CommitProfileChanges();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
     gSettings.minimizeToTray=SendMessageW(H(IDC_MINTRAY),BM_GETCHECK,0,0)==BST_CHECKED;
     if(!gSettings.minimizeToTray)
         SetTrayIconVisible(false);
@@ -2076,7 +2173,8 @@ case IDC_FOOT_ABOUT:ShowAbout();break;
 case ID_TRAY_OPEN:ShowMain();break;case ID_TRAY_CHECK_UPDATE:{if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,(LPVOID)1,0,nullptr))CloseHandle(h);break;}case ID_TRAY_ABOUT:ShowAbout();break;case ID_TRAY_EXIT:gReallyExit=true;DestroyWindow(w);break;}return 0;}case WM_CLOSE:
     gReallyExit=true;
     DestroyWindow(w);
-    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_DESTROY:KillTimer(w,1);SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
+    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_HOTKEY:{if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileName));return 0;}
+case WM_DESTROY:UnregisterAllHotkeys();KillTimer(w,1);SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
 
 int WINAPI wWinMain(HINSTANCE h,HINSTANCE,LPWSTR cmd,int){
 HANDLE instanceMutex=CreateMutexW(nullptr,TRUE,INSTANCE_MUTEX_NAME);
@@ -2106,7 +2204,7 @@ int mainW=mainWr.right-mainWr.left, mainH=mainWr.bottom-mainWr.top;
 int mainX=mainWork.left+((mainWork.right-mainWork.left)-mainW)/2;
 int mainY=mainWork.top+((mainWork.bottom-mainWork.top)-mainH)/2;
 SetWindowPos(gWnd,nullptr,mainX,mainY,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-SetWindowLongPtrW(gWnd,GWLP_USERDATA,0);gTrayMenu=CreatePopupMenu();AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_OPEN,L"Open NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_CHECK_UPDATE,L"Check for updates");AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_ABOUT,L"About NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_EXIT,L"Exit");gNid.cbSize=sizeof(gNid);gNid.hWnd=gWnd;gNid.uID=1;gNid.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;gNid.uCallbackMessage=WM_TRAY;gNid.hIcon=gIcon;wcscpy_s(gNid.szTip,L"NvProfileSwitcher");gStatusOk=InitNv();if(gStatusOk){if(gSettings.desktopProfiles.empty()&&!gDisplays.empty()){DisplayTarget* pd=nullptr;for(auto&d:gDisplays)if(d.primary){pd=&d;break;}if(!pd)pd=&gDisplays.front();EnsureDesktopProfile(pd->gdiName);}EnsureAllGameDisplayProfiles();Save();if(auto* p=SelectedProfile())RefreshDisplayCombo(*p);DispatchSwitching(switching::Event::Startup());LoadSelected();}bool min=(wcsstr(cmd,L"--minimized")!=nullptr);
+SetWindowLongPtrW(gWnd,GWLP_USERDATA,0);gTrayMenu=CreatePopupMenu();AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_OPEN,L"Open NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_CHECK_UPDATE,L"Check for updates");AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_ABOUT,L"About NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_EXIT,L"Exit");gNid.cbSize=sizeof(gNid);gNid.hWnd=gWnd;gNid.uID=1;gNid.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;gNid.uCallbackMessage=WM_TRAY;gNid.hIcon=gIcon;wcscpy_s(gNid.szTip,L"NvProfileSwitcher");gStatusOk=InitNv();if(gStatusOk){if(gSettings.desktopProfiles.empty()&&!gDisplays.empty()){DisplayTarget* pd=nullptr;for(auto&d:gDisplays)if(d.primary){pd=&d;break;}if(!pd)pd=&gDisplays.front();EnsureDesktopProfile(pd->gdiName);}EnsureAllGameDisplayProfiles();Save();if(auto* p=SelectedProfile())RefreshDisplayCombo(*p);DispatchSwitching(switching::Event::Startup());LoadSelected();}RegisterAllHotkeys();bool min=(wcsstr(cmd,L"--minimized")!=nullptr);
 if(min) SetTrayIconVisible(true);
 ShowWindow(gWnd,min?SW_HIDE:SW_SHOW);
 UpdateWindow(gWnd);if(gSettings.checkUpdates){if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,nullptr,0,nullptr))CloseHandle(h);}MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}DeleteObject(gFont);DeleteObject(gFontBold);DeleteObject(gFontTitle);DeleteObject(gIconFont);DeleteObject(gBackBrush);DeleteObject(gPanelBrush);DeleteObject(gPanel2Brush);DeleteObject(gFieldBrush);
