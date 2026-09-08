@@ -45,6 +45,12 @@ _Avoid_: Manual mode, lock, pinned mode
 The behaviour when no override is in place: the active profile follows executable triggers, falling back to the Windows profile when none matches.
 _Avoid_: Auto mode, detection
 
+### Editing
+
+**Preview**:
+Unsaved slider values applied to the selected display while a profile is being edited. A preview never becomes the active profile; it is discarded (the real state is re-applied) when the selection, the display, or the window state changes without a save.
+_Avoid_: Live mode, temporary profile, draft
+
 ### Displays
 
 **Display**:

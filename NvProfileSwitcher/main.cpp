@@ -81,7 +81,7 @@ constexpr wchar_t APP_URL[]=L"https://github.com/GastonJetpacks/NvProfileSwitche
 constexpr wchar_t SUPPORT_URL[]=L"https://ko-fi.com/mgcarnevali";
 constexpr wchar_t UPDATE_HOST[]=L"api.github.com";
 constexpr wchar_t UPDATE_PATH[]=L"/repos/GastonJetpacks/NvProfileSwitcher/releases/latest";
-enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR,IDC_LBL_RESET_HOTKEY,IDC_RESET_HOTKEY,IDC_RESET_HOTKEY_CLEAR};
+enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR,IDC_LBL_RESET_HOTKEY,IDC_RESET_HOTKEY,IDC_RESET_HOTKEY_CLEAR,IDC_DEFAULTS};
 enum {ID_TRAY_OPEN=2001,ID_TRAY_CHECK_UPDATE,ID_TRAY_ABOUT,ID_TRAY_EXIT};
 
 HINSTANCE gInst{}; HWND gWnd{}; HFONT gFont{},gFontBold{},gFontTitle{},gIconFont{}; HBRUSH gBackBrush{},gPanelBrush{},gPanel2Brush{},gFieldBrush{}; HICON gIcon{};
@@ -802,6 +802,50 @@ void LoadValuesToSliders(const DisplayProfileValues& v){
     RedrawAllSliders();
 }
 
+// ---- Live preview ---------------------------------------------------------
+// Preview: unsaved slider values applied to the selected display while a
+// profile is being edited. It never becomes the active profile. Discarding a
+// preview re-applies the real state (the active profile, or Windows).
+constexpr UINT_PTR TIMER_SWITCHING=1, TIMER_PREVIEW=2;
+bool gPreviewDirty=false;
+DisplayProfileValues SliderValues(){
+    DisplayProfileValues v;
+    v.vibrance=(int)SendMessageW(H(IDC_VIB),TBM_GETPOS,0,0);
+    v.hue=(int)SendMessageW(H(IDC_HUE),TBM_GETPOS,0,0);
+    v.brightness=(double)(int)SendMessageW(H(IDC_BRI),TBM_GETPOS,0,0);
+    v.contrast=(double)(int)SendMessageW(H(IDC_CON),TBM_GETPOS,0,0);
+    v.gamma=(int)SendMessageW(H(IDC_GAM),TBM_GETPOS,0,0)/100.0;
+    return v;
+}
+// Debounced so a drag does not flood the driver with LUT updates.
+void SchedulePreview(){ if(gWnd) SetTimer(gWnd,TIMER_PREVIEW,40,nullptr); }
+void ApplyPreview(){
+    KillTimer(gWnd,TIMER_PREVIEW);
+    int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);
+    if(ds<0||ds>=(int)gDisplays.size()) return;
+    DisplayProfileValues v=SliderValues();
+    v.displayName=gDisplays[ds].gdiName;
+    GameProfile carrier; // Apply() reads the flat values and displayName only
+    Apply(ApplyProfileForValues(carrier,v));
+    gPreviewDirty=true;
+}
+void ReapplyActive(){
+    if(gSwitching.activeId!=switching::kWindowsId){
+        if(const auto* p=ProfileById(gSwitching.activeId)){ ApplyGameProfile(*p); return; }
+    }
+    RestoreAllDesktopProfiles();
+}
+void DiscardPreview(){
+    if(gWnd) KillTimer(gWnd,TIMER_PREVIEW);
+    if(!gPreviewDirty) return;
+    gPreviewDirty=false;
+    ReapplyActive();
+}
+void ResetSlidersToDefaults(){
+    LoadValuesToSliders(DisplayProfileValues{}); // the struct defaults are the driver-neutral values
+    SchedulePreview();
+}
+
 DisplayProfileValues ValuesFromFlatProfile(const GameProfile& p){
     return {p.displayName,p.vibrance,p.hue,p.brightness,p.contrast,p.gamma};
 }
@@ -953,6 +997,7 @@ void SetDesktopUi(bool desktop){
     }
 
     MoveWindow(H(IDC_SAVE),rightX+rightW-110,ySave-3,110,32,TRUE);
+    MoveWindow(H(IDC_DEFAULTS),rightX+rightW-232,ySave-3,110,32,TRUE);
 
     // Global startup options stay at the bottom of the right panel.
     // Global options in two balanced rows.
@@ -970,6 +1015,7 @@ void SetDesktopUi(bool desktop){
 }
 void LoadSelected(){
     StopHotkeyRecording(false);
+    DiscardPreview();
     int i=(int)SendMessageW(H(IDC_LIST),LB_GETCURSEL,0,0);
     if(i<0||i>(int)gSettings.profiles.size())return;
     gSelected=i;
@@ -1038,14 +1084,11 @@ void SaveSelected(){
         p->gamma=(int)SendMessageW(H(IDC_GAM),TBM_GETPOS,0,0)/100.0;
         Save();
         RefreshList();
+        gPreviewDirty=false; // the saved values are now the real ones
         Apply(*p);
-        if(gSwitching.overrideActive){
-            // The pinned profile stays on screen; the new Windows values are
-            // saved for when the override ends.
-            if(const auto* pinned=ProfileById(gSwitching.activeId)) ApplyGameProfile(*pinned);
-        }else{
-            gSwitching.activeId=switching::kWindowsId;
-        }
+        // If a profile is active (pinned or automatic) it stays on screen; the
+        // new Windows values show when it ends.
+        if(gSwitching.activeId!=switching::kWindowsId) ReapplyActive();
         return;
     }
 
@@ -1084,10 +1127,14 @@ void SaveSelected(){
     CommitProfileChanges();
     RefreshList();
 
+    const bool previewed=gPreviewDirty;
+    gPreviewDirty=false; // the saved values are now the real ones
     if(ProfileId(*p)==gSwitching.activeId){
         // The active profile's values changed: show them now.
         ApplyGameProfile(*p);
     }else{
+        // A preview of an inactive profile must not linger on screen.
+        if(previewed) ReapplyActive();
         // Let automatic switching pick the profile up if its executable is
         // already in the foreground (no effect during an override).
         DispatchSwitching(switching::Event::ForegroundChanged(ForegroundProcessName()));
@@ -1232,7 +1279,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* d){
     SelectObject(d->hDC,buttonFont);
     GetTextExtentPoint32W(d->hDC,caption,(int)wcslen(caption),&sz);
 
-    const bool textOnly=(id==IDC_SAVE||id==IDC_HOTKEY_CLEAR||id==IDC_RESET_HOTKEY_CLEAR);
+    const bool textOnly=(id==IDC_SAVE||id==IDC_HOTKEY_CLEAR||id==IDC_RESET_HOTKEY_CLEAR||id==IDC_DEFAULTS);
     int iconW=textOnly?0:((id==IDC_ADD||id==IDC_REMOVE)?19:20);
     int gap=textOnly?0:6;
     if(id==IDC_BROWSE) gap=7;
@@ -1806,6 +1853,7 @@ void BuildControls(){
     slider(L"Hue (\x00B0)",IDC_LBL_HUE,IDC_HUE,IDC_VALHUE,580,0,359);
 
     Add(L"BUTTON",L"Save profile",BS_OWNERDRAW,rightX+rightW-110,654,110,32,IDC_SAVE);
+    Add(L"BUTTON",L"Defaults",BS_OWNERDRAW,rightX+rightW-232,654,110,32,IDC_DEFAULTS);
     Add(L"BUTTON",L"Add profile",BS_OWNERDRAW,34,r.bottom-169,110,32,IDC_ADD);
     Add(L"BUTTON",L"Remove",BS_OWNERDRAW,154,r.bottom-169,110,32,IDC_REMOVE);
 
@@ -2299,6 +2347,7 @@ void ShowMain(){
 } void RestoreDesktop(){RestoreAllDesktopProfiles();gSwitching.activeId=switching::kWindowsId;InvalidateRect(gWnd,nullptr,FALSE);}
 LRESULT CALLBACK Proc(HWND w,UINT m,WPARAM wp,LPARAM lp){switch(m){case WM_SHOW_EXISTING_INSTANCE:ShowMain();return 0;case WM_UPDATE_AVAILABLE:ShowUpdateAvailable((UpdateInfo*)lp);return 0;case WM_CREATE:gWnd=w;BuildControls();RefreshList();LoadSelected();SetTimer(w,1,250,nullptr);return 0;case WM_SIZE:
     if(wp==SIZE_MINIMIZED){
+        DiscardPreview();
         if(gSettings.minimizeToTray){
             SetTrayIconVisible(true);
             ShowWindow(w,SW_HIDE);
@@ -2347,7 +2396,7 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         DrawValueBox(d);return TRUE;
     }
 
-    if(d->CtlID==IDC_SAVE||d->CtlID==IDC_ADD||d->CtlID==IDC_REMOVE||d->CtlID==IDC_BROWSE||d->CtlID==IDC_HOTKEY_CLEAR||d->CtlID==IDC_RESET_HOTKEY_CLEAR){
+    if(d->CtlID==IDC_SAVE||d->CtlID==IDC_ADD||d->CtlID==IDC_REMOVE||d->CtlID==IDC_BROWSE||d->CtlID==IDC_HOTKEY_CLEAR||d->CtlID==IDC_RESET_HOTKEY_CLEAR||d->CtlID==IDC_DEFAULTS){
         DrawOwnerButton(d);return TRUE;
     }
     if(d->CtlID==IDC_HOTKEY||d->CtlID==IDC_RESET_HOTKEY){
@@ -2408,7 +2457,8 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         return TRUE;
     }
     break;
-}case WM_HSCROLL:UpdateSliderLabels();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;
+}case WM_HSCROLL:UpdateSliderLabels();SchedulePreview();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:if(wp==TIMER_PREVIEW)ApplyPreview();else CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){DiscardPreview();int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;
+case IDC_DEFAULTS:ResetSlidersToDefaults();break;
 case IDC_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_HOTKEY));break; // HKN_CHANGED: applied on Save
 case IDC_HOTKEY_CLEAR:ClearHotkeyField(IDC_HOTKEY);break;
 case IDC_RESET_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_RESET_HOTKEY));else if(HIWORD(wp)==HKN_CHANGED)CommitResetHotkey();break;

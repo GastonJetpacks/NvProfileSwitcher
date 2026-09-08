@@ -12,6 +12,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Hotkey triggers. A profile can carry a global key combination, assigned in Profile Settings by clicking the new **Hotkey** field and pressing the keys (a modifier is optional; **Clear** unbinds). Two profiles cannot share a combination. Pressing it applies the profile to all displays and starts an **override**: executable triggers are ignored until the application restarts. Pressing the active profile's own hotkey does nothing; pressing another profile's hotkey switches to it. Disabling or removing the pinned profile ends the override.
 - A single application-wide **reset hotkey**, set in Application Settings and unbound by default, returns every display to the Windows profile and ends the override, so automatic switching resumes.
 - The footer now shows the active profile, with **(hotkey)** while an override is in place, and a warning when a hotkey could not be registered because another application owns it.
+- Live preview while editing: moving a slider applies the values to the selected display immediately. Nothing is saved until **Save profile**; selecting another profile or display, or minimizing, discards the preview and restores the real colours.
+- A **Defaults** button next to **Save profile** returns brightness, contrast, gamma, vibrance, and hue to neutral values, previewed the same way.
 
 ### Changed
 

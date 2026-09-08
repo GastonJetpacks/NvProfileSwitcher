@@ -110,8 +110,12 @@ Releases page.
 3. Click **Add profile**.
 4. Select the application's executable.
 5. Choose the display where the application runs.
-6. Configure the desired color settings.
-7. Click **Save profile**.
+6. Configure the desired color settings. The selected display previews every
+   change live, so you can tune by eye. Nothing is stored until you save;
+   selecting another profile or display discards the preview.
+7. Click **Save profile**. **Defaults** puts all five controls back to neutral
+   values (brightness 100, contrast 100, gamma 1.00, vibrance 50, hue 0),
+   previewed the same way.
 
 NvProfileSwitcher will now detect when that application owns the foreground
 window and automatically apply its profile.

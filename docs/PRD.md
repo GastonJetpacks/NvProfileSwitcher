@@ -83,8 +83,8 @@ Status legend: **Shipped** = present in 1.2.0. **Partial** = present with known 
 | C3 | Gamma, range 0.30 to 2.80, default 1.00. Applied via the LUT. | Shipped |
 | C4 | Digital Vibrance, 0 to 100 percent with 50 as driver default. Mapped onto the driver-reported min/default/max range like the NVIDIA App. | Shipped |
 | C5 | Hue, 0 to 359 degrees, default 0. | Shipped |
-| C6 | Live preview while dragging a slider before saving. | Partial. Sliders update their value labels live but values are only applied on **Save profile** (or when the profile becomes active). |
-| C7 | "Reset to defaults" per control or per profile. | Gap |
+| C6 | Live preview while dragging a slider before saving. | Shipped (unreleased). Slider changes are applied to the selected display as a preview; discarded on selection, display, or minimize without a save. |
+| C7 | "Reset to defaults" per control or per profile. | Partial. A **Defaults** button resets all five controls for the selected display; per-control reset is not implemented. |
 
 ### 5.3 Switching engine
 
