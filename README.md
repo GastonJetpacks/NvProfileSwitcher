@@ -119,6 +119,33 @@ window and automatically apply its profile.
 Switch away from the application and your Windows profile is restored
 automatically.
 
+## Hotkeys
+
+Any profile can also be activated with a global key combination.
+
+1. Select the profile and click the **Hotkey** field in Profile Settings.
+2. Press the key or combination you want, for example `Ctrl+Alt+1` or `F9`.
+   A modifier key is optional.
+3. Click **Save profile**.
+
+Pressing the hotkey applies the profile to all displays, even while
+NvProfileSwitcher is minimized to the tray, and starts an **override**: the
+profile stays active and automatic switching is paused until you restart
+NvProfileSwitcher. The footer shows the active profile with **(hotkey)** while
+an override is in place. Pressing another profile's hotkey switches to that
+profile; pressing the active profile's own hotkey does nothing.
+
+Use **Clear** next to the field to remove a hotkey. Two profiles cannot share
+a combination: saving is blocked with a message naming the other profile.
+
+If another application already owns the combination, the field and the footer
+show it as unavailable. The binding is kept and retried the next time
+NvProfileSwitcher starts.
+
+Press **Esc** while the field says "Press a key..." to cancel without changing
+the binding. A key without a modifier is captured system-wide while
+NvProfileSwitcher runs, so other applications will not see it.
+
 ## Color controls
 
 Each profile can independently configure:
