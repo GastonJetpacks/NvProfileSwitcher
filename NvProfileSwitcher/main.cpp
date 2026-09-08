@@ -18,6 +18,10 @@
 #include <regex>
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include "resource.h"
 #include "version.h"
 #include "switching.h"
@@ -87,7 +91,7 @@ enum {ID_TRAY_OPEN=2001,ID_TRAY_CHECK_UPDATE,ID_TRAY_ABOUT,ID_TRAY_EXIT};
 HINSTANCE gInst{}; HWND gWnd{}; HFONT gFont{},gFontBold{},gFontTitle{},gIconFont{}; HBRUSH gBackBrush{},gPanelBrush{},gPanel2Brush{},gFieldBrush{}; HICON gIcon{};
 ULONG_PTR gGdiPlusToken{}; Gdiplus::Image* gHeaderImage{};
 Gdiplus::Image *gSliderBrightness{},*gSliderContrast{},*gSliderGamma{},*gSliderVibrance{},*gSliderHue{},*gNvidiaDriverIcon{};
-Settings gSettings; int gSelected=-1; bool gReallyExit=false; switching::State gSwitching; unsigned gNextProfileUid=1; std::wstring gStatus=L"Not initialized", gDriverVersion=L"--"; bool gStatusOk=false;
+Settings gSettings; int gSelected=-1; bool gReallyExit=false; switching::State gSwitching; unsigned gNextProfileUid=1; std::mutex gNvApplyMutex; /* serialises NVAPI apply calls between the UI thread and the preview worker */ std::wstring gStatus=L"Not initialized", gDriverVersion=L"--"; bool gStatusOk=false;
 NOTIFYICONDATAW gNid{}; HMENU gTrayMenu{};
 HWND gFooterHover{};
 
@@ -600,6 +604,7 @@ bool Apply(const GameProfile&p){
     if(!t || !t->handle || !t->displayId){
         gStatus=L"Selected NVIDIA display is not available";gStatusOk=false;InvalidateRect(gWnd,nullptr,FALSE);return false;
     }
+    std::lock_guard<std::mutex> nv(gNvApplyMutex);
     DVCINFOEX d{};
     d.version=(unsigned int)(sizeof(d)|(1u<<16));
     if(pGetDvc(t->handle,0,&d)!=0){gStatus=L"Could not read Digital Vibrance";gStatusOk=false;InvalidateRect(gWnd,nullptr,FALSE);return false;}
@@ -806,8 +811,20 @@ void LoadValuesToSliders(const DisplayProfileValues& v){
 // Preview: unsaved slider values applied to the selected display while a
 // profile is being edited. It never becomes the active profile. Discarding a
 // preview re-applies the real state (the active profile, or Windows).
-constexpr UINT_PTR TIMER_SWITCHING=1, TIMER_PREVIEW=2;
-bool gPreviewDirty=false;
+//
+// NVAPI calls take tens of milliseconds each and would stall the trackbar if
+// they ran on the UI thread, so previews go to a worker thread. The worker
+// always applies the most recent request (intermediate drag positions are
+// dropped) and only touches the controls whose values changed since its last
+// apply. All NVAPI apply calls, from either thread, are serialised by
+// gNvApplyMutex. A generation counter lets the UI thread cancel a preview that
+// is still queued or in flight, so a discard or save can never be overwritten
+// by a stale preview.
+struct PreviewRequest{ DisplayProfileValues values; void* handle=nullptr; unsigned displayId=0; unsigned generation=0; bool pending=false; };
+std::mutex gPreviewMutex; std::condition_variable gPreviewCv; PreviewRequest gPreviewReq; bool gPreviewQuit=false; std::thread gPreviewThread;
+std::atomic<unsigned> gPreviewGeneration{0}; // bumped by the UI thread to invalidate outstanding previews
+bool gPreviewDirty=false;                    // UI thread only: a preview may be on screen
+
 DisplayProfileValues SliderValues(){
     DisplayProfileValues v;
     v.vibrance=(int)SendMessageW(H(IDC_VIB),TBM_GETPOS,0,0);
@@ -817,17 +834,73 @@ DisplayProfileValues SliderValues(){
     v.gamma=(int)SendMessageW(H(IDC_GAM),TBM_GETPOS,0,0)/100.0;
     return v;
 }
-// Debounced so a drag does not flood the driver with LUT updates.
-void SchedulePreview(){ if(gWnd) SetTimer(gWnd,TIMER_PREVIEW,40,nullptr); }
-void ApplyPreview(){
-    KillTimer(gWnd,TIMER_PREVIEW);
+// NVAPI only, no UI state. `last` is the previous apply on the same target so
+// unchanged controls are skipped; nullptr applies everything.
+bool ApplyValuesToTarget(void* handle,unsigned displayId,const DisplayProfileValues& v,const DisplayProfileValues* last){
+    if(!pSetDvc||!pGetDvc||!pSetHue||!pSetTargetGamma||!handle||!displayId) return false;
+    if(!last||last->vibrance!=v.vibrance){
+        DVCINFOEX d{}; d.version=(unsigned int)(sizeof(d)|(1u<<16));
+        if(pGetDvc(handle,0,&d)!=0) return false;
+        d.currentLevel=std::clamp(DvcRawFromPercent(v.vibrance,d),d.minLevel,d.maxLevel);
+        if(pSetDvc(handle,0,&d)!=0) return false;
+    }
+    if(!last||last->hue!=v.hue){
+        unsigned int hue=(unsigned int)(((v.hue%360)+360)%360);
+        if(pSetHue(handle,0,hue)!=0) return false;
+    }
+    if(!last||last->brightness!=v.brightness||last->contrast!=v.contrast||last->gamma!=v.gamma){
+        if(!SetNvGamma(displayId,v.brightness,v.contrast,v.gamma)) return false;
+    }
+    return true;
+}
+void PreviewWorker(){
+    DisplayProfileValues last; bool haveLast=false; unsigned lastGeneration=0;
+    for(;;){
+        PreviewRequest req;
+        {
+            std::unique_lock<std::mutex> lk(gPreviewMutex);
+            gPreviewCv.wait(lk,[]{return gPreviewReq.pending||gPreviewQuit;});
+            if(gPreviewQuit) return;
+            req=gPreviewReq; gPreviewReq.pending=false;
+        }
+        std::lock_guard<std::mutex> nv(gNvApplyMutex);
+        if(req.generation!=gPreviewGeneration.load()) continue; // cancelled while queued
+        // The cache is only valid within one preview session (one generation).
+        const bool sameSession=haveLast&&lastGeneration==req.generation;
+        if(ApplyValuesToTarget(req.handle,req.displayId,req.values,sameSession?&last:nullptr)){
+            last=req.values; haveLast=true; lastGeneration=req.generation;
+        }else{
+            haveLast=false;
+        }
+    }
+}
+void RequestPreview(){
     int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);
     if(ds<0||ds>=(int)gDisplays.size()) return;
-    DisplayProfileValues v=SliderValues();
-    v.displayName=gDisplays[ds].gdiName;
-    GameProfile carrier; // Apply() reads the flat values and displayName only
-    Apply(ApplyProfileForValues(carrier,v));
+    if(!gPreviewThread.joinable()) gPreviewThread=std::thread(PreviewWorker);
+    {
+        std::lock_guard<std::mutex> lk(gPreviewMutex);
+        gPreviewReq.values=SliderValues();
+        gPreviewReq.values.displayName=gDisplays[ds].gdiName;
+        gPreviewReq.handle=gDisplays[ds].handle;
+        gPreviewReq.displayId=gDisplays[ds].displayId;
+        gPreviewReq.generation=gPreviewGeneration.load();
+        gPreviewReq.pending=true;
+    }
+    gPreviewCv.notify_one();
     gPreviewDirty=true;
+}
+// Any queued or in-flight preview becomes stale. Call before applying the
+// real state so the worker cannot overwrite it afterwards.
+void CancelPendingPreview(){
+    ++gPreviewGeneration;
+    std::lock_guard<std::mutex> lk(gPreviewMutex);
+    gPreviewReq.pending=false;
+}
+void StopPreviewWorker(){
+    { std::lock_guard<std::mutex> lk(gPreviewMutex); gPreviewQuit=true; }
+    gPreviewCv.notify_one();
+    if(gPreviewThread.joinable()) gPreviewThread.join();
 }
 void ReapplyActive(){
     if(gSwitching.activeId!=switching::kWindowsId){
@@ -836,14 +909,14 @@ void ReapplyActive(){
     RestoreAllDesktopProfiles();
 }
 void DiscardPreview(){
-    if(gWnd) KillTimer(gWnd,TIMER_PREVIEW);
+    CancelPendingPreview();
     if(!gPreviewDirty) return;
     gPreviewDirty=false;
     ReapplyActive();
 }
 void ResetSlidersToDefaults(){
     LoadValuesToSliders(DisplayProfileValues{}); // the struct defaults are the driver-neutral values
-    SchedulePreview();
+    RequestPreview();
 }
 
 DisplayProfileValues ValuesFromFlatProfile(const GameProfile& p){
@@ -1084,6 +1157,7 @@ void SaveSelected(){
         p->gamma=(int)SendMessageW(H(IDC_GAM),TBM_GETPOS,0,0)/100.0;
         Save();
         RefreshList();
+        CancelPendingPreview();
         gPreviewDirty=false; // the saved values are now the real ones
         Apply(*p);
         // If a profile is active (pinned or automatic) it stays on screen; the
@@ -1127,6 +1201,7 @@ void SaveSelected(){
     CommitProfileChanges();
     RefreshList();
 
+    CancelPendingPreview();
     const bool previewed=gPreviewDirty;
     gPreviewDirty=false; // the saved values are now the real ones
     if(ProfileId(*p)==gSwitching.activeId){
@@ -2457,7 +2532,7 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         return TRUE;
     }
     break;
-}case WM_HSCROLL:UpdateSliderLabels();SchedulePreview();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:if(wp==TIMER_PREVIEW)ApplyPreview();else CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){DiscardPreview();int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;
+}case WM_HSCROLL:UpdateSliderLabels();RequestPreview();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){DiscardPreview();int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;
 case IDC_DEFAULTS:ResetSlidersToDefaults();break;
 case IDC_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_HOTKEY));break; // HKN_CHANGED: applied on Save
 case IDC_HOTKEY_CLEAR:ClearHotkeyField(IDC_HOTKEY);break;
@@ -2480,7 +2555,7 @@ case ID_TRAY_OPEN:ShowMain();break;case ID_TRAY_CHECK_UPDATE:{if(HANDLE h=Create
     if((int)wp==RESET_HOTKEY_ID)DispatchSwitching(switching::Event::ResetHotkeyPressed());
     else if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileId));
     return 0;}
-case WM_DESTROY:UnregisterAllHotkeys();KillTimer(w,1);SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
+case WM_DESTROY:UnregisterAllHotkeys();KillTimer(w,1);StopPreviewWorker();SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
 
 int WINAPI wWinMain(HINSTANCE h,HINSTANCE,LPWSTR cmd,int){
 HANDLE instanceMutex=CreateMutexW(nullptr,TRUE,INSTANCE_MUTEX_NAME);
