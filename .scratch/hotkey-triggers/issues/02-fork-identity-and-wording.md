@@ -18,10 +18,16 @@
 
 ## Acceptance criteria
 
-- [ ] Footer GitHub link and tray About dialog open the fork's repository page.
-- [ ] Update check requests the fork's latest release and compares against it.
-- [ ] Installer publisher, support, and updates URLs point at the fork.
-- [ ] The button under the profile list reads "Add profile"; the executable field label reads "Executable".
-- [ ] No user-visible string in the application says "game" or "Game" in the sense of a profile.
-- [ ] README and CHANGELOG reflect the wording change and the fork URLs.
-- [ ] An existing `profiles.json` loads without change.
+- [x] Footer GitHub link and tray About dialog open the fork's repository page.
+- [x] Update check requests the fork's latest release and compares against it.
+- [x] Installer publisher, support, and updates URLs point at the fork.
+- [x] The button under the profile list reads "Add profile"; the executable field label reads "Executable".
+- [x] No user-visible string in the application says "game" or "Game" in the sense of a profile.
+- [x] README and CHANGELOG reflect the wording change and the fork URLs.
+- [x] An existing `profiles.json` loads without change. (JSON keys untouched.)
+
+## Comments
+
+**2026-09-08, implemented.** Source URL constants, installer URL, "Add profile", "Executable", and the About dialog tagline ("Per-application NVIDIA display color profiles for Windows") changed. README reworded and gained a fork note under the title; CHANGELOG gained an Unreleased section that also records ticket 01. Application rebuilt locally.
+
+Left alone on purpose: the Ko-fi link and FUNDING file (per spec), the installer publisher name and the licence copyright (the original author's), and `CODE_SIGNING.md`, which describes upstream's SignPath policy and still links upstream because this fork's builds are not signed under it. The screenshot file name `game-profile.png` is unchanged; only its caption was reworded.

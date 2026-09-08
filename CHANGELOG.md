@@ -5,6 +5,14 @@ All notable changes to NvProfileSwitcher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- This fork now identifies itself as `GastonJetpacks/NvProfileSwitcher`: the footer GitHub link, the About dialog, the update checker, and the installer URLs point at this repository instead of upstream.
+- Profiles are no longer called "games" in the interface. The **Add game** button is now **Add profile** and the **Game executable** label is now **Executable**. Existing `profiles.json` files load unchanged.
+- The switching decision (which profile becomes active when the foreground window changes) moved into a standalone module with automated tests that run in CI. No behaviour change.
+
 ## 1.2.0 — 2026-09-04
 
 ### Added
