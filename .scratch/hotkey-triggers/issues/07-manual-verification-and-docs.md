@@ -12,6 +12,8 @@
 
 - This ticket needs a human at a Windows machine with an NVIDIA GPU; the agent can prepare the build and the checklist but cannot press keys against a real driver.
 - Record results as a `## Comments` entry in this file, one line per checklist item.
+- **Build ready (2026-09-08):** tickets 01 to 06 are committed on branch `feature/hotkey-triggers`. A local release-flags build of that branch is at `NvProfileSwitcher/NvProfileSwitcher.exe` (gitignored). It reads and writes the same `%APPDATA%\NvProfileSwitcher\profiles.json` as the installed version, adding `Hotkey` and `ResetHotkey` fields on first save; the old version ignores them, so switching back is safe. Close any running NvProfileSwitcher first (single instance).
+- Points worth extra attention during the run, from the implementation notes: the reset field is narrow (about 110 px), Escape with a modifier is recordable while bare Escape cancels, and renaming a profile that is pinned by an override ends the override on save.
 
 ## Acceptance criteria
 
