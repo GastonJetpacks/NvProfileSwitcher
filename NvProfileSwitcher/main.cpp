@@ -77,7 +77,7 @@ constexpr wchar_t APP_URL[]=L"https://github.com/GastonJetpacks/NvProfileSwitche
 constexpr wchar_t SUPPORT_URL[]=L"https://ko-fi.com/mgcarnevali";
 constexpr wchar_t UPDATE_HOST[]=L"api.github.com";
 constexpr wchar_t UPDATE_PATH[]=L"/repos/GastonJetpacks/NvProfileSwitcher/releases/latest";
-enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR};
+enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR,IDC_LBL_RESET_HOTKEY,IDC_RESET_HOTKEY,IDC_RESET_HOTKEY_CLEAR};
 enum {ID_TRAY_OPEN=2001,ID_TRAY_CHECK_UPDATE,ID_TRAY_ABOUT,ID_TRAY_EXIT};
 
 HINSTANCE gInst{}; HWND gWnd{}; HFONT gFont{},gFontBold{},gFontTitle{},gIconFont{}; HBRUSH gBackBrush{},gPanelBrush{},gPanel2Brush{},gFieldBrush{}; HICON gIcon{};
@@ -805,6 +805,29 @@ void ClearHotkeyField(int id){
     InvalidateRect(h,nullptr,TRUE);
     SendMessageW(gWnd,WM_COMMAND,MAKEWPARAM(id,HKN_CHANGED),(LPARAM)h);
 }
+// Application Settings save on interaction, so a recorded or cleared reset
+// hotkey is persisted and registered at once. A conflict with a profile's
+// hotkey reverts the field and names the profile.
+void CommitResetHotkey(){
+    const std::wstring text=GetTxt(IDC_RESET_HOTKEY);
+    const std::wstring canonical=hotkey::Canonical(text);
+    if(!canonical.empty()){
+        for(const auto& p:gSettings.profiles){
+            if(hotkey::Canonical(p.hotkey)==canonical){
+                Txt(IDC_RESET_HOTKEY,HotkeyDisplayText(gSettings.resetHotkey));
+                InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
+                std::wstring msg=L"The hotkey "+canonical+L" is already used by the profile \""+p.name+
+                                 L"\".\n\nChoose a different reset hotkey, or clear that profile's hotkey first.";
+                MessageBoxW(gWnd,msg.c_str(),L"Hotkey already in use",MB_OK|MB_ICONWARNING);
+                return;
+            }
+        }
+    }
+    gSettings.resetHotkey=canonical.empty()?text:canonical;
+    Save();
+    RegisterAllHotkeys();
+    InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
+}
 bool IsModifierKey(UINT vk){
     return vk==VK_SHIFT||vk==VK_CONTROL||vk==VK_MENU||vk==VK_LWIN||vk==VK_RWIN||
            vk==VK_LSHIFT||vk==VK_RSHIFT||vk==VK_LCONTROL||vk==VK_RCONTROL||vk==VK_LMENU||vk==VK_RMENU;
@@ -1170,7 +1193,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* d){
     SelectObject(d->hDC,buttonFont);
     GetTextExtentPoint32W(d->hDC,caption,(int)wcslen(caption),&sz);
 
-    const bool textOnly=(id==IDC_SAVE||id==IDC_HOTKEY_CLEAR);
+    const bool textOnly=(id==IDC_SAVE||id==IDC_HOTKEY_CLEAR||id==IDC_RESET_HOTKEY_CLEAR);
     int iconW=textOnly?0:((id==IDC_ADD||id==IDC_REMOVE)?19:20);
     int gap=textOnly?0:6;
     if(id==IDC_BROWSE) gap=7;
@@ -1208,9 +1231,13 @@ void DrawHotkeyField(const DRAWITEMSTRUCT* d){
     else shown=text;
 
     bool unavailable=false;
-    if(!recording&&!text.empty()&&d->CtlID==IDC_HOTKEY){
-        const GameProfile* p=IsDesktopSelected()?nullptr:SelectedProfile();
-        unavailable=p&&text==HotkeyDisplayText(p->hotkey)&&HotkeyUnavailable(p->name);
+    if(!recording&&!text.empty()){
+        if(d->CtlID==IDC_HOTKEY){
+            const GameProfile* p=IsDesktopSelected()?nullptr:SelectedProfile();
+            unavailable=p&&text==HotkeyDisplayText(p->hotkey)&&HotkeyUnavailable(p->name);
+        }else if(d->CtlID==IDC_RESET_HOTKEY){
+            unavailable=text==HotkeyDisplayText(gSettings.resetHotkey)&&ResetHotkeyUnavailable();
+        }
     }
 
     RECT tr=r;tr.left+=10;tr.right-=8;
@@ -1751,6 +1778,13 @@ void BuildControls(){
     Add(L"BUTTON",L"",BS_AUTOCHECKBOX,rightX+220,r.bottom-51,20,22,IDC_CHECKUPDATES);
     Add(L"STATIC",L"Check for updates",0,rightX+244,r.bottom-50,145,22,0);
 
+    // Reset hotkey, to the right of the two checkbox rows: label above, field and clear below.
+    const int resetX=rightX+425;
+    HWND lblReset=Add(L"STATIC",L"Reset hotkey",0,resetX,r.bottom-74,rightW-425,22,IDC_LBL_RESET_HOTKEY);SendMessageW(lblReset,WM_SETFONT,(WPARAM)gFontBold,TRUE);
+    HWND resetField=Add(L"BUTTON",HotkeyDisplayText(gSettings.resetHotkey).c_str(),BS_OWNERDRAW,resetX,r.bottom-53,rightW-425-30,26,IDC_RESET_HOTKEY);
+    SetWindowSubclass(resetField,HotkeyFieldSubclassProc,1,0);
+    Add(L"BUTTON",L"\x00D7",BS_OWNERDRAW,rightX+rightW-26,r.bottom-53,26,26,IDC_RESET_HOTKEY_CLEAR);
+
     SendMessageW(H(IDC_STARTWIN),BM_SETCHECK,gSettings.startWindows?BST_CHECKED:BST_UNCHECKED,0);
     SendMessageW(H(IDC_STARTMIN),BM_SETCHECK,gSettings.startMinimized?BST_CHECKED:BST_UNCHECKED,0);
     SendMessageW(H(IDC_MINTRAY),BM_SETCHECK,gSettings.minimizeToTray?BST_CHECKED:BST_UNCHECKED,0);
@@ -2272,10 +2306,10 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         DrawValueBox(d);return TRUE;
     }
 
-    if(d->CtlID==IDC_SAVE||d->CtlID==IDC_ADD||d->CtlID==IDC_REMOVE||d->CtlID==IDC_BROWSE||d->CtlID==IDC_HOTKEY_CLEAR){
+    if(d->CtlID==IDC_SAVE||d->CtlID==IDC_ADD||d->CtlID==IDC_REMOVE||d->CtlID==IDC_BROWSE||d->CtlID==IDC_HOTKEY_CLEAR||d->CtlID==IDC_RESET_HOTKEY_CLEAR){
         DrawOwnerButton(d);return TRUE;
     }
-    if(d->CtlID==IDC_HOTKEY){
+    if(d->CtlID==IDC_HOTKEY||d->CtlID==IDC_RESET_HOTKEY){
         DrawHotkeyField(d);return TRUE;
     }
     if(d->CtlID==IDC_FOOT_GITHUB||d->CtlID==IDC_FOOT_SUPPORT||d->CtlID==IDC_FOOT_ABOUT){
@@ -2335,7 +2369,9 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
     break;
 }case WM_HSCROLL:UpdateSliderLabels();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;
 case IDC_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_HOTKEY));break; // HKN_CHANGED: applied on Save
-case IDC_HOTKEY_CLEAR:ClearHotkeyField(IDC_HOTKEY);break;case IDC_ADD:{GameProfile np{};if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();CommitProfileChanges();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);CommitProfileChanges();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
+case IDC_HOTKEY_CLEAR:ClearHotkeyField(IDC_HOTKEY);break;
+case IDC_RESET_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_RESET_HOTKEY));else if(HIWORD(wp)==HKN_CHANGED)CommitResetHotkey();break;
+case IDC_RESET_HOTKEY_CLEAR:ClearHotkeyField(IDC_RESET_HOTKEY);break;case IDC_ADD:{GameProfile np{};if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();CommitProfileChanges();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);CommitProfileChanges();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
     gSettings.minimizeToTray=SendMessageW(H(IDC_MINTRAY),BM_GETCHECK,0,0)==BST_CHECKED;
     if(!gSettings.minimizeToTray)
         SetTrayIconVisible(false);

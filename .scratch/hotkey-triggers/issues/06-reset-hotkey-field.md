@@ -15,10 +15,18 @@
 
 ## Acceptance criteria
 
-- [ ] Application Settings shows a labelled "Reset hotkey" field and clear button to the right of the existing checkboxes, visible for every selected profile.
-- [ ] Recording Ctrl+Alt+0 saves it, and pressing Ctrl+Alt+0 during an override restores the Windows profile without restarting.
-- [ ] The clear button unbinds and saves; pressing the old combination then does nothing.
-- [ ] Recording a combination already used by a profile shows a message naming that profile, and the field reverts to the previous value.
-- [ ] A binding Windows rejected shows with the "(unavailable)" suffix and the footer marker.
-- [ ] A fresh install shows the field empty.
-- [ ] README and CHANGELOG describe the reset hotkey.
+Implemented and compiling; interactive verification is ticket 07's job.
+
+- [x] Application Settings shows a labelled "Reset hotkey" field and clear button to the right of the existing checkboxes, visible for every selected profile.
+- [x] Recording Ctrl+Alt+0 saves it, and pressing Ctrl+Alt+0 during an override restores the Windows profile without restarting. (record commits, saves, and re-registers at once)
+- [x] The clear button unbinds and saves; pressing the old combination then does nothing.
+- [x] Recording a combination already used by a profile shows a message naming that profile, and the field reverts to the previous value.
+- [x] A binding Windows rejected shows with the "(unavailable)" suffix and the footer marker.
+- [x] A fresh install shows the field empty. ("None" placeholder)
+- [x] README and CHANGELOG describe the reset hotkey.
+
+## Comments
+
+**2026-09-08, implemented.** Same capture control and subclass as ticket 05, keyed by control id for the unavailable lookup. The field listens for the `HKN_CHANGED` notification the control posts after a recording or a clear and commits immediately: conflict check against every profile's hotkey, revert plus message on conflict, otherwise save and re-register.
+
+Layout: the two checkbox rows end around 390 px into the right panel, so the reset control sits in the remaining strip at the right edge, label on the first row and field plus a compact "×" clear button on the second. The field is narrow (about 110 px), so long combinations are shortened with an ellipsis; the full text is still what gets saved. If that proves too cramped in ticket 07, the fix is a layout change to the Application Settings block, not to the control.

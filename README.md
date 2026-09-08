@@ -146,6 +146,14 @@ Press **Esc** while the field says "Press a key..." to cancel without changing
 the binding. A key without a modifier is captured system-wide while
 NvProfileSwitcher runs, so other applications will not see it.
 
+### Reset hotkey
+
+The **Reset hotkey** field in Application Settings sets one application-wide
+combination that returns every display to the Windows profile and ends the
+override, so automatic switching resumes. It is unbound by default. Recording
+or clearing it takes effect immediately; no Save is needed. It cannot share a
+combination with a profile's hotkey.
+
 ## Color controls
 
 Each profile can independently configure:
