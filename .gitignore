@@ -1,0 +1,7 @@
+# Build outputs
+NvProfileSwitcher/*.obj
+NvProfileSwitcher/*.res
+NvProfileSwitcher/*.exe
+NvProfileSwitcher/*.pdb
+NvProfileSwitcher/tests/out/
+NvProfileSwitcher/installer/output/
