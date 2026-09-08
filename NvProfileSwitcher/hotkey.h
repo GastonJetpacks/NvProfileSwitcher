@@ -38,7 +38,7 @@ std::optional<Hotkey> Parse(const std::wstring& text);
 std::wstring Format(const Hotkey& hk);
 
 // Canonical text for arbitrary input: Format(Parse(text)), or empty when the
-// text does not parse. Two bindings conflict when their canonical texts are
+// text does not parse. Two hotkeys conflict when their canonical texts are
 // equal and non-empty.
 std::wstring Canonical(const std::wstring& text);
 

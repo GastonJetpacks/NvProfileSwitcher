@@ -25,9 +25,9 @@ const ProfileInfo* MatchExecutableTrigger(const std::vector<ProfileInfo>& profil
     return nullptr;
 }
 
-const ProfileInfo* FindProfile(const std::vector<ProfileInfo>& profiles, const std::wstring& name) {
+const ProfileInfo* FindProfile(const std::vector<ProfileInfo>& profiles, const std::wstring& id) {
     for (const auto& p : profiles) {
-        if (p.name == name) return &p;
+        if (p.id == id) return &p;
     }
     return nullptr;
 }
@@ -36,13 +36,13 @@ const ProfileInfo* FindProfile(const std::vector<ProfileInfo>& profiles, const s
 // the current one. Leaves the override flag as it is.
 Decision Activate(const State& current, const std::wstring& next) {
     Decision d{current, {}};
-    if (next == current.activeProfile) return d;
-    d.state.activeProfile = next;
-    if (next == kWindowsProfileName) {
+    if (next == current.activeId) return d;
+    d.state.activeId = next;
+    if (next == kWindowsId) {
         d.action.kind = ActionKind::RestoreWindows;
     } else {
         d.action.kind = ActionKind::ApplyProfile;
-        d.action.profile = next;
+        d.action.profileId = next;
     }
     return d;
 }
@@ -50,7 +50,7 @@ Decision Activate(const State& current, const std::wstring& next) {
 // End the override and return to the Windows profile. Automatic switching
 // resumes on the next foreground event.
 Decision EndOverride(const State& current) {
-    Decision d = Activate(current, kWindowsProfileName);
+    Decision d = Activate(current, kWindowsId);
     d.state.overrideActive = false;
     return d;
 }
@@ -71,14 +71,14 @@ Decision Decide(const State& current, const std::vector<ProfileInfo>& profiles, 
         // ADR 0001: while an override is in place executable triggers are ignored.
         if (current.overrideActive) return {current, {}};
         const ProfileInfo* hit = MatchExecutableTrigger(profiles, event.value);
-        return Activate(current, hit ? hit->name : std::wstring(kWindowsProfileName));
+        return Activate(current, hit ? hit->id : std::wstring(kWindowsId));
     }
     case Event::Kind::HotkeyPressed: {
         // ADR 0001: a hotkey press pins its profile. Pressing the active
         // profile's own hotkey is a no-op, never a toggle.
         const ProfileInfo* p = FindProfile(profiles, event.value);
         if (!p || !p->enabled) return {current, {}};
-        Decision d = Activate(current, p->name);
+        Decision d = Activate(current, p->id);
         d.state.overrideActive = true;
         return d;
     }
@@ -92,7 +92,7 @@ Decision Decide(const State& current, const std::vector<ProfileInfo>& profiles, 
         // If the pinned profile was disabled or removed, the override ends so
         // the user is never stuck on colours they can no longer see or edit.
         if (!current.overrideActive) return {current, {}};
-        const ProfileInfo* pinned = FindProfile(profiles, current.activeProfile);
+        const ProfileInfo* pinned = FindProfile(profiles, current.activeId);
         if (pinned && pinned->enabled) return {current, {}};
         return EndOverride(current);
     }

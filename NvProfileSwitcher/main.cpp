@@ -53,8 +53,12 @@ struct GameProfile {
     double brightness=100.0, contrast=100.0, gamma=1.00;
     bool enabled=true;
     std::vector<DisplayProfileValues> displayProfiles;
-    // Hotkey trigger in canonical text form (see hotkey.h); empty = unbound.
+    // Hotkey trigger in canonical text form (see hotkey.h); empty = none.
+    // Text that does not parse is kept verbatim and shown as unavailable.
     std::wstring hotkey;
+    // Runtime identity for the switching module and hotkey registration.
+    // Assigned at load or add, never persisted. Names are not identities.
+    unsigned uid=0;
 };
 struct Settings {
     GameProfile desktop{L"Windows",L"",L"",50,0,100.0,100.0,1.00,true}; // default values for new Windows monitor profiles
@@ -83,7 +87,7 @@ enum {ID_TRAY_OPEN=2001,ID_TRAY_CHECK_UPDATE,ID_TRAY_ABOUT,ID_TRAY_EXIT};
 HINSTANCE gInst{}; HWND gWnd{}; HFONT gFont{},gFontBold{},gFontTitle{},gIconFont{}; HBRUSH gBackBrush{},gPanelBrush{},gPanel2Brush{},gFieldBrush{}; HICON gIcon{};
 ULONG_PTR gGdiPlusToken{}; Gdiplus::Image* gHeaderImage{};
 Gdiplus::Image *gSliderBrightness{},*gSliderContrast{},*gSliderGamma{},*gSliderVibrance{},*gSliderHue{},*gNvidiaDriverIcon{};
-Settings gSettings; int gSelected=-1; bool gReallyExit=false; switching::State gSwitching; std::wstring gStatus=L"Not initialized", gDriverVersion=L"--"; bool gStatusOk=false;
+Settings gSettings; int gSelected=-1; bool gReallyExit=false; switching::State gSwitching; unsigned gNextProfileUid=1; std::wstring gStatus=L"Not initialized", gDriverVersion=L"--"; bool gStatusOk=false;
 NOTIFYICONDATAW gNid{}; HMENU gTrayMenu{};
 HWND gFooterHover{};
 
@@ -193,6 +197,7 @@ GameProfile ParseProfile(const std::string&o){
     p.gamma=FieldN(o,"Gamma",1.0);
     p.enabled=FieldB(o,"Enabled",true);
     p.hotkey=Unescape(FieldS(o,"Hotkey",""));
+    if(std::wstring c=hotkey::Canonical(p.hotkey);!c.empty()) p.hotkey=c; // canonical once; unparseable text kept verbatim
 
     size_t dp=o.find("\"Display Profiles\"");
     if(dp!=std::string::npos){
@@ -343,6 +348,7 @@ void Load(){
     gSettings.minimizeToTray=FieldB(s,"MinimizeToTray",false);
     gSettings.checkUpdates=FieldB(s,"CheckForUpdates",true);
     gSettings.resetHotkey=Unescape(FieldS(s,"ResetHotkey",""));
+    if(std::wstring c=hotkey::Canonical(gSettings.resetHotkey);!c.empty()) gSettings.resetHotkey=c;
 
     size_t wp=s.find("\"Windows Profiles\"");
     if(wp!=std::string::npos){
@@ -362,7 +368,7 @@ void Load(){
         size_t a=s.find('[',pr), b=FindMatchingJson(s,a,'[',']');
         if(a!=std::string::npos&&b!=std::string::npos){
             for(const auto& obj:JsonObjectsInArray(s,a,b))
-                gSettings.profiles.push_back(ParseProfile(obj));
+                {GameProfile p=ParseProfile(obj);p.uid=gNextProfileUid++;gSettings.profiles.push_back(p);}
         }
     }
 }
@@ -623,23 +629,31 @@ std::wstring ForegroundProcessName(){
     CloseHandle(hp);
     return name;
 }
-// Adapter between the settings globals and the pure switching module: reduce
-// each profile to what the decision needs (name, executable basename, enabled).
+// Adapter between the settings globals and the pure switching module. Profiles
+// are identified by their runtime id, never by name: names may repeat, and a
+// user may name a profile "Windows".
+std::wstring ProfileId(const GameProfile& p){ return std::to_wstring(p.uid); }
+const GameProfile* ProfileById(const std::wstring& id){
+    for(const auto& p:gSettings.profiles) if(ProfileId(p)==id) return &p;
+    return nullptr;
+}
 std::vector<switching::ProfileInfo> SwitchingProfiles(){
     std::vector<switching::ProfileInfo> out;
     out.reserve(gSettings.profiles.size());
     for(const auto& p:gSettings.profiles)
-        out.push_back({p.name,p.exePath.empty()?std::wstring():ProcessName(p.exePath),p.enabled});
+        out.push_back({ProfileId(p),p.exePath.empty()?std::wstring():ProcessName(p.exePath),p.enabled});
     return out;
 }
-const GameProfile* ProfileByName(const std::wstring& name){
-    for(const auto& p:gSettings.profiles) if(p.name==name) return &p;
-    return nullptr;
+// Name shown for the active profile in the footer.
+std::wstring ActiveProfileName(){
+    if(gSwitching.activeId==switching::kWindowsId) return L"Windows";
+    if(const auto* p=ProfileById(gSwitching.activeId)) return p->name;
+    return L"Windows";
 }
 void PerformSwitchingAction(const switching::Action& a){
     switch(a.kind){
     case switching::ActionKind::ApplyProfile:
-        if(const auto* p=ProfileByName(a.profile)) ApplyGameProfile(*p);
+        if(const auto* p=ProfileById(a.profileId)) ApplyGameProfile(*p);
         break;
     case switching::ActionKind::RestoreWindows:
         // Restore every configured Windows display so each monitor returns
@@ -652,7 +666,7 @@ void PerformSwitchingAction(const switching::Action& a){
 }
 void DispatchSwitching(const switching::Event& e){
     switching::Decision d=switching::Decide(gSwitching,SwitchingProfiles(),e);
-    bool changed=d.state.activeProfile!=gSwitching.activeProfile||d.state.overrideActive!=gSwitching.overrideActive;
+    bool changed=d.state.activeId!=gSwitching.activeId||d.state.overrideActive!=gSwitching.overrideActive;
     gSwitching=d.state;
     PerformSwitchingAction(d.action);
     if(changed&&gWnd) InvalidateRect(gWnd,nullptr,FALSE);
@@ -661,15 +675,19 @@ void CheckProcesses(){
     DispatchSwitching(switching::Event::ForegroundChanged(ForegroundProcessName()));
 }
 
-// Hotkey trigger registration. Every enabled profile with a binding is
-// registered with RegisterHotKey (never a low-level keyboard hook). The whole
-// set is re-registered after any profile change. A binding Windows rejects, or
-// one that does not parse, is remembered as unavailable; it stays saved and is
-// retried on the next re-registration.
-struct RegisteredHotkey{int id; std::wstring profileName; bool registered;}; // profileName empty = reset hotkey
+// Hotkey trigger registration. Every enabled profile with a hotkey is
+// registered with RegisterHotKey (never a low-level keyboard hook) under an id
+// derived from the profile's runtime id, so a WM_HOTKEY already queued when
+// the set is rebuilt still resolves to the profile it was pressed for. The
+// whole set is re-registered after any profile change. A hotkey Windows
+// rejects, or one that does not parse, is unavailable; it stays saved and is
+// retried on the next pass.
+struct RegisteredHotkey{int id; std::wstring profileId; bool registered;}; // profileId empty = reset hotkey
 std::vector<RegisteredHotkey> gHotkeys;
 constexpr int RESET_HOTKEY_ID=99;
 constexpr int HOTKEY_ID_BASE=100;
+int HotkeyIdFor(const GameProfile& p){ return HOTKEY_ID_BASE+(int)p.uid; }
+bool HotkeyTextParses(const std::wstring& text){ return text.empty()||!hotkey::Canonical(text).empty(); }
 void UnregisterAllHotkeys(){
     for(const auto& h:gHotkeys) if(h.registered) UnregisterHotKey(gWnd,h.id);
     gHotkeys.clear();
@@ -684,15 +702,13 @@ void RegisterAllHotkeys(){
         }
         gHotkeys.push_back({RESET_HOTKEY_ID,L"",ok});
     }
-    int id=HOTKEY_ID_BASE;
     for(const auto& p:gSettings.profiles){
         if(!p.enabled||p.hotkey.empty()) continue;
         bool ok=false;
         if(auto hk=hotkey::Parse(p.hotkey)){
-            ok=RegisterHotKey(gWnd,id,hk->modifiers|MOD_NOREPEAT,hk->key)!=0;
+            ok=RegisterHotKey(gWnd,HotkeyIdFor(p),hk->modifiers|MOD_NOREPEAT,hk->key)!=0;
         }
-        gHotkeys.push_back({id,p.name,ok});
-        ++id;
+        gHotkeys.push_back({HotkeyIdFor(p),ProfileId(p),ok});
     }
     InvalidateRect(gWnd,nullptr,FALSE);
 }
@@ -700,17 +716,41 @@ const RegisteredHotkey* HotkeyById(int id){
     for(const auto& h:gHotkeys) if(h.id==id) return &h;
     return nullptr;
 }
-bool AnyHotkeyUnavailable(){
-    for(const auto& h:gHotkeys) if(!h.registered) return true;
-    return false;
-}
-bool HotkeyUnavailable(const std::wstring& profileName){
-    for(const auto& h:gHotkeys) if(h.id!=RESET_HOTKEY_ID&&h.profileName==profileName) return !h.registered;
+// A stored hotkey is unavailable when it does not parse (so it is never
+// registered) or when Windows refused to register it. A disabled profile's
+// parseable hotkey is simply not registered, which is not "unavailable".
+bool HotkeyUnavailable(const GameProfile& p){
+    if(p.hotkey.empty()) return false;
+    if(!HotkeyTextParses(p.hotkey)) return true;
+    for(const auto& h:gHotkeys) if(h.id!=RESET_HOTKEY_ID&&h.profileId==ProfileId(p)) return !h.registered;
     return false;
 }
 bool ResetHotkeyUnavailable(){
+    if(gSettings.resetHotkey.empty()) return false;
+    if(!HotkeyTextParses(gSettings.resetHotkey)) return true;
     if(const auto* h=HotkeyById(RESET_HOTKEY_ID)) return !h->registered;
     return false;
+}
+bool AnyHotkeyUnavailable(){
+    if(ResetHotkeyUnavailable()) return true;
+    for(const auto& p:gSettings.profiles) if(HotkeyUnavailable(p)) return true;
+    return false;
+}
+// Who already uses this hotkey text: empty if nobody, otherwise a phrase for
+// the conflict message. `except` skips the profile being saved. Stored text is
+// canonical (or unparseable), so plain equality is the right comparison.
+std::wstring HotkeyOwner(const std::wstring& text,const GameProfile* except,bool includeReset){
+    if(text.empty()) return L"";
+    for(const auto& p:gSettings.profiles){
+        if(&p==except) continue;
+        if(p.hotkey==text) return L"the profile \""+p.name+L"\"";
+    }
+    if(includeReset&&gSettings.resetHotkey==text) return L"the reset hotkey";
+    return L"";
+}
+void ShowHotkeyConflict(const std::wstring& text,const std::wstring& owner){
+    std::wstring msg=L"The hotkey "+text+L" is already used by "+owner+L".\n\nChoose a different hotkey, or clear the other one first.";
+    MessageBoxW(gWnd,msg.c_str(),L"Hotkey already in use",MB_OK|MB_ICONWARNING);
 }
 // Persist profiles, re-register hotkeys, and let the switching module react
 // (for example ending an override whose profile was disabled or removed).
@@ -771,59 +811,68 @@ GameProfile* SelectedProfile(){ if(gSelected==0)return CurrentDesktopProfile(); 
 // ---- Hotkey capture field -------------------------------------------------
 // An owner-drawn button that records the next key press. Clicking it (or
 // pressing Space while it has focus) starts recording; the next non-modifier
-// key, with whatever modifiers are held, becomes the binding. Escape on its own
-// cancels; losing focus cancels. While recording, every registered hotkey is
-// released so an already-bound combination can be captured, then restored.
-constexpr WORD HKN_CHANGED=0x0100; // WM_COMMAND notification code: a binding was recorded
+// key, with whatever modifiers are held, becomes the hotkey. Escape on its own
+// cancels; losing focus cancels. A combination that is currently registered
+// arrives as WM_HOTKEY instead of a key-down, so the main window forwards it
+// to RecordHotkey while a recording is in progress; registrations are never
+// touched by the field itself.
+constexpr WORD HKN_CHANGED=0x0100; // WM_COMMAND notification code: the field's hotkey changed
 struct HotkeyCaptureState{ HWND recording=nullptr; HWND swallowKeyUp=nullptr; std::wstring previous; } gCapture;
-std::wstring HotkeyDisplayText(const std::wstring& stored){
-    std::wstring c=hotkey::Canonical(stored);
-    return c.empty()?stored:c; // unparseable text is shown verbatim (and drawn as unavailable)
+void NotifyHotkeyFieldChanged(HWND h){
+    // Posted rather than sent so a conflict message appears after the key-up
+    // has been delivered, keeping the swallow flag consistent.
+    PostMessageW(gWnd,WM_COMMAND,MAKEWPARAM(GetDlgCtrlID(h),HKN_CHANGED),(LPARAM)h);
 }
 void StopHotkeyRecording(bool commit){
     HWND h=gCapture.recording;
     if(!h) return;
     gCapture.recording=nullptr;
     if(!commit) SetWindowTextW(h,gCapture.previous.c_str());
-    RegisterAllHotkeys();
     InvalidateRect(h,nullptr,TRUE);
-    if(commit) SendMessageW(gWnd,WM_COMMAND,MAKEWPARAM(GetDlgCtrlID(h),HKN_CHANGED),(LPARAM)h);
+    if(commit) NotifyHotkeyFieldChanged(h);
 }
 void StartHotkeyRecording(HWND h){
     if(gCapture.recording==h) return;
     StopHotkeyRecording(false);
     gCapture.recording=h;
+    gCapture.swallowKeyUp=nullptr;
     gCapture.previous=GetTxt(GetDlgCtrlID(h));
-    UnregisterAllHotkeys();
     SetFocus(h);
     InvalidateRect(h,nullptr,TRUE);
+}
+// Commit the pressed combination to the recording field. Called from the
+// field's WM_KEYDOWN or from the main window's WM_HOTKEY. Returns false when
+// the key is not recordable, in which case recording continues.
+bool RecordHotkey(unsigned mods,unsigned vk){
+    HWND h=gCapture.recording;
+    if(!h) return false;
+    std::wstring text=hotkey::Format(hotkey::Hotkey{mods,vk});
+    if(text.empty()) return false;
+    SetWindowTextW(h,text.c_str());
+    gCapture.swallowKeyUp=h; // the matching key-up must not click the button
+    StopHotkeyRecording(true);
+    return true;
 }
 void ClearHotkeyField(int id){
     HWND h=H(id);
     if(gCapture.recording==h) StopHotkeyRecording(false);
+    gCapture.swallowKeyUp=nullptr;
     SetWindowTextW(h,L"");
     InvalidateRect(h,nullptr,TRUE);
-    SendMessageW(gWnd,WM_COMMAND,MAKEWPARAM(id,HKN_CHANGED),(LPARAM)h);
+    NotifyHotkeyFieldChanged(h);
 }
 // Application Settings save on interaction, so a recorded or cleared reset
 // hotkey is persisted and registered at once. A conflict with a profile's
 // hotkey reverts the field and names the profile.
 void CommitResetHotkey(){
-    const std::wstring text=GetTxt(IDC_RESET_HOTKEY);
-    const std::wstring canonical=hotkey::Canonical(text);
-    if(!canonical.empty()){
-        for(const auto& p:gSettings.profiles){
-            if(hotkey::Canonical(p.hotkey)==canonical){
-                Txt(IDC_RESET_HOTKEY,HotkeyDisplayText(gSettings.resetHotkey));
-                InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
-                std::wstring msg=L"The hotkey "+canonical+L" is already used by the profile \""+p.name+
-                                 L"\".\n\nChoose a different reset hotkey, or clear that profile's hotkey first.";
-                MessageBoxW(gWnd,msg.c_str(),L"Hotkey already in use",MB_OK|MB_ICONWARNING);
-                return;
-            }
-        }
+    const std::wstring text=GetTxt(IDC_RESET_HOTKEY); // canonical, empty, or the stored unparseable text
+    if(std::wstring owner=HotkeyOwner(text,nullptr,false);!owner.empty()){
+        Txt(IDC_RESET_HOTKEY,gSettings.resetHotkey);
+        InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
+        ShowHotkeyConflict(text,owner);
+        return;
     }
-    gSettings.resetHotkey=canonical.empty()?text:canonical;
+    gSettings.resetHotkey=text;
     Save();
     RegisterAllHotkeys();
     InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
@@ -846,11 +895,7 @@ LRESULT CALLBACK HotkeyFieldSubclassProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
         if(GetKeyState(VK_MENU)&0x8000) mods|=hotkey::kAlt;
         if((GetKeyState(VK_LWIN)&0x8000)||(GetKeyState(VK_RWIN)&0x8000)) mods|=hotkey::kWin;
         if(vk==VK_ESCAPE&&mods==0){ StopHotkeyRecording(false); return 0; }
-        std::wstring text=hotkey::Format(hotkey::Hotkey{mods,vk});
-        if(text.empty()) return 0; // unsupported key: keep recording
-        SetWindowTextW(hwnd,text.c_str());
-        gCapture.swallowKeyUp=hwnd; // the matching key-up must not click the button
-        StopHotkeyRecording(true);
+        RecordHotkey(mods,vk); // unsupported key: keeps recording
         return 0;
     }
     case WM_KEYUP: case WM_SYSKEYUP:
@@ -861,6 +906,7 @@ LRESULT CALLBACK HotkeyFieldSubclassProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
         if(recording) return 0;
         break;
     case WM_KILLFOCUS:
+        gCapture.swallowKeyUp=nullptr; // a key-up that went elsewhere must not leave a stale flag
         if(recording) StopHotkeyRecording(false);
         break;
     case WM_NCDESTROY:
@@ -968,7 +1014,7 @@ void LoadSelected(){
     Txt(IDC_NAME,p->name);
     Txt(IDC_EXE,p->exePath);
     SendMessageW(H(IDC_ENABLED),BM_SETCHECK,p->enabled?BST_CHECKED:BST_UNCHECKED,0);
-    Txt(IDC_HOTKEY,HotkeyDisplayText(p->hotkey));
+    Txt(IDC_HOTKEY,p->hotkey);
     InvalidateRect(H(IDC_HOTKEY),nullptr,TRUE);
 
     if(ds>=0&&ds<(int)gDisplays.size())
@@ -993,7 +1039,13 @@ void SaveSelected(){
         Save();
         RefreshList();
         Apply(*p);
-        if(!gSwitching.overrideActive) gSwitching.activeProfile=switching::kWindowsProfileName;
+        if(gSwitching.overrideActive){
+            // The pinned profile stays on screen; the new Windows values are
+            // saved for when the override ends.
+            if(const auto* pinned=ProfileById(gSwitching.activeId)) ApplyGameProfile(*pinned);
+        }else{
+            gSwitching.activeId=switching::kWindowsId;
+        }
         return;
     }
 
@@ -1001,29 +1053,16 @@ void SaveSelected(){
     if(!p)return;
 
     // Hotkey conflicts block the save before anything is changed.
-    const std::wstring hotkeyText=GetTxt(IDC_HOTKEY);
-    const std::wstring canonical=hotkey::Canonical(hotkeyText);
-    if(!canonical.empty()){
-        for(size_t i=0;i<gSettings.profiles.size();++i){
-            if((int)i==gSelected-1) continue;
-            if(hotkey::Canonical(gSettings.profiles[i].hotkey)==canonical){
-                std::wstring msg=L"The hotkey "+canonical+L" is already used by the profile \""+gSettings.profiles[i].name+
-                                 L"\".\n\nChoose a different hotkey, or clear the other profile's hotkey first.";
-                MessageBoxW(gWnd,msg.c_str(),L"Hotkey already in use",MB_OK|MB_ICONWARNING);
-                return;
-            }
-        }
-        if(hotkey::Canonical(gSettings.resetHotkey)==canonical){
-            std::wstring msg=L"The hotkey "+canonical+L" is already used by the reset hotkey.\n\nChoose a different hotkey, or clear the reset hotkey first.";
-            MessageBoxW(gWnd,msg.c_str(),L"Hotkey already in use",MB_OK|MB_ICONWARNING);
-            return;
-        }
+    const std::wstring hotkeyText=GetTxt(IDC_HOTKEY); // canonical, empty, or the stored unparseable text
+    if(std::wstring owner=HotkeyOwner(hotkeyText,p,true);!owner.empty()){
+        ShowHotkeyConflict(hotkeyText,owner);
+        return;
     }
 
     p->name=GetTxt(IDC_NAME);
     p->exePath=GetTxt(IDC_EXE);
     p->enabled=SendMessageW(H(IDC_ENABLED),BM_GETCHECK,0,0)==BST_CHECKED;
-    p->hotkey=canonical.empty()?hotkeyText:canonical; // unparseable text is preserved verbatim
+    p->hotkey=hotkeyText;
 
     if(ds>=0&&ds<(int)gDisplays.size()){
         p->displayName=gDisplays[ds].gdiName;
@@ -1045,7 +1084,7 @@ void SaveSelected(){
     CommitProfileChanges();
     RefreshList();
 
-    if(p->name==gSwitching.activeProfile){
+    if(ProfileId(*p)==gSwitching.activeId){
         // The active profile's values changed: show them now.
         ApplyGameProfile(*p);
     }else{
@@ -1215,16 +1254,16 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* d){
 }
 
 // Hotkey capture field: dark field, accent border while recording or focused,
-// "Press a key..." while recording, "None" when unbound, and an "(unavailable)"
-// suffix in the danger colour when the saved binding could not be registered.
+// "Press a key..." while recording, "None" when there is no hotkey, and an
+// "(unavailable)" suffix in the danger colour when the text does not parse or
+// the saved hotkey could not be registered.
 void DrawHotkeyField(const DRAWITEMSTRUCT* d){
     RECT r=d->rcItem;
     const bool recording=(gCapture.recording==d->hwndItem);
     const bool focused=(d->itemState&ODS_FOCUS)!=0;
     FillRound(d->hDC,r,C_FIELD,(recording||focused)?C_ACCENT:C_BORDER,7);
 
-    wchar_t buf[128]{};GetWindowTextW(d->hwndItem,buf,128);
-    const std::wstring text=buf;
+    const std::wstring text=GetTxt((int)d->CtlID);
     std::wstring shown; COLORREF color=C_TEXT;
     if(recording){shown=L"Press a key...";color=C_MUTED;}
     else if(text.empty()){shown=L"None";color=C_MUTED;}
@@ -1232,11 +1271,13 @@ void DrawHotkeyField(const DRAWITEMSTRUCT* d){
 
     bool unavailable=false;
     if(!recording&&!text.empty()){
-        if(d->CtlID==IDC_HOTKEY){
+        if(!HotkeyTextParses(text)){
+            unavailable=true; // never registered
+        }else if(d->CtlID==IDC_HOTKEY){
             const GameProfile* p=IsDesktopSelected()?nullptr:SelectedProfile();
-            unavailable=p&&text==HotkeyDisplayText(p->hotkey)&&HotkeyUnavailable(p->name);
+            unavailable=p&&text==p->hotkey&&HotkeyUnavailable(*p); // only the saved hotkey can be unavailable
         }else if(d->CtlID==IDC_RESET_HOTKEY){
-            unavailable=text==HotkeyDisplayText(gSettings.resetHotkey)&&ResetHotkeyUnavailable();
+            unavailable=text==gSettings.resetHotkey&&ResetHotkeyUnavailable();
         }
     }
 
@@ -1711,7 +1752,7 @@ void Paint(HWND w){
         GetTextExtentPoint32W(dc,warn.c_str(),(int)warn.size(),&warnSize);
         const int reserved=suffixSize.cx+(warn.empty()?0:warnSize.cx+12);
 
-        std::wstring name=FitText(dc,gSwitching.activeProfile,linksLeft-x-reserved);
+        std::wstring name=FitText(dc,ActiveProfileName(),linksLeft-x-reserved);
         DrawLabel(dc,name.c_str(),x,footerY,C_TEXT,gFont);
         SIZE nameSize{};GetTextExtentPoint32W(dc,name.c_str(),(int)name.size(),&nameSize);
         x+=nameSize.cx;
@@ -1781,7 +1822,7 @@ void BuildControls(){
     // Reset hotkey, to the right of the two checkbox rows: label above, field and clear below.
     const int resetX=rightX+425;
     HWND lblReset=Add(L"STATIC",L"Reset hotkey",0,resetX,r.bottom-74,rightW-425,22,IDC_LBL_RESET_HOTKEY);SendMessageW(lblReset,WM_SETFONT,(WPARAM)gFontBold,TRUE);
-    HWND resetField=Add(L"BUTTON",HotkeyDisplayText(gSettings.resetHotkey).c_str(),BS_OWNERDRAW,resetX,r.bottom-53,rightW-425-30,26,IDC_RESET_HOTKEY);
+    HWND resetField=Add(L"BUTTON",gSettings.resetHotkey.c_str(),BS_OWNERDRAW,resetX,r.bottom-53,rightW-425-30,26,IDC_RESET_HOTKEY);
     SetWindowSubclass(resetField,HotkeyFieldSubclassProc,1,0);
     Add(L"BUTTON",L"\x00D7",BS_OWNERDRAW,rightX+rightW-26,r.bottom-53,26,26,IDC_RESET_HOTKEY_CLEAR);
 
@@ -2255,7 +2296,7 @@ void ShowMain(){
 
     SetForegroundWindow(gWnd);
     BringWindowToTop(gWnd);
-} void RestoreDesktop(){RestoreAllDesktopProfiles();gSwitching.activeProfile=switching::kWindowsProfileName;InvalidateRect(gWnd,nullptr,FALSE);}
+} void RestoreDesktop(){RestoreAllDesktopProfiles();gSwitching.activeId=switching::kWindowsId;InvalidateRect(gWnd,nullptr,FALSE);}
 LRESULT CALLBACK Proc(HWND w,UINT m,WPARAM wp,LPARAM lp){switch(m){case WM_SHOW_EXISTING_INSTANCE:ShowMain();return 0;case WM_UPDATE_AVAILABLE:ShowUpdateAvailable((UpdateInfo*)lp);return 0;case WM_CREATE:gWnd=w;BuildControls();RefreshList();LoadSelected();SetTimer(w,1,250,nullptr);return 0;case WM_SIZE:
     if(wp==SIZE_MINIMIZED){
         if(gSettings.minimizeToTray){
@@ -2371,7 +2412,7 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
 case IDC_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_HOTKEY));break; // HKN_CHANGED: applied on Save
 case IDC_HOTKEY_CLEAR:ClearHotkeyField(IDC_HOTKEY);break;
 case IDC_RESET_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_RESET_HOTKEY));else if(HIWORD(wp)==HKN_CHANGED)CommitResetHotkey();break;
-case IDC_RESET_HOTKEY_CLEAR:ClearHotkeyField(IDC_RESET_HOTKEY);break;case IDC_ADD:{GameProfile np{};if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();CommitProfileChanges();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);CommitProfileChanges();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
+case IDC_RESET_HOTKEY_CLEAR:ClearHotkeyField(IDC_RESET_HOTKEY);break;case IDC_ADD:{GameProfile np{};np.uid=gNextProfileUid++;if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();CommitProfileChanges();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);CommitProfileChanges();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
     gSettings.minimizeToTray=SendMessageW(H(IDC_MINTRAY),BM_GETCHECK,0,0)==BST_CHECKED;
     if(!gSettings.minimizeToTray)
         SetTrayIconVisible(false);
@@ -2382,7 +2423,13 @@ case IDC_FOOT_ABOUT:ShowAbout();break;
 case ID_TRAY_OPEN:ShowMain();break;case ID_TRAY_CHECK_UPDATE:{if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,(LPVOID)1,0,nullptr))CloseHandle(h);break;}case ID_TRAY_ABOUT:ShowAbout();break;case ID_TRAY_EXIT:gReallyExit=true;DestroyWindow(w);break;}return 0;}case WM_CLOSE:
     gReallyExit=true;
     DestroyWindow(w);
-    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_HOTKEY:{if((int)wp==RESET_HOTKEY_ID)DispatchSwitching(switching::Event::ResetHotkeyPressed());else if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileName));return 0;}
+    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_HOTKEY:{
+    // While a capture field is recording, a registered combination is being
+    // re-recorded: hand it to the field instead of switching profiles.
+    if(gCapture.recording){RecordHotkey(LOWORD(lp)&(MOD_ALT|MOD_CONTROL|MOD_SHIFT|MOD_WIN),HIWORD(lp));return 0;}
+    if((int)wp==RESET_HOTKEY_ID)DispatchSwitching(switching::Event::ResetHotkeyPressed());
+    else if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileId));
+    return 0;}
 case WM_DESTROY:UnregisterAllHotkeys();KillTimer(w,1);SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
 
 int WINAPI wWinMain(HINSTANCE h,HINSTANCE,LPWSTR cmd,int){

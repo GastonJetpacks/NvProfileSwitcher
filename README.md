@@ -139,11 +139,11 @@ Use **Clear** next to the field to remove a hotkey. Two profiles cannot share
 a combination: saving is blocked with a message naming the other profile.
 
 If another application already owns the combination, the field and the footer
-show it as unavailable. The binding is kept and retried the next time
+show it as unavailable. The hotkey is kept and retried the next time
 NvProfileSwitcher starts.
 
 Press **Esc** while the field says "Press a key..." to cancel without changing
-the binding. A key without a modifier is captured system-wide while
+the hotkey. A key without a modifier is captured system-wide while
 NvProfileSwitcher runs, so other applications will not see it.
 
 ### Reset hotkey
