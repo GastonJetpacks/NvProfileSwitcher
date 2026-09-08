@@ -18,8 +18,14 @@
 #include <regex>
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include "resource.h"
 #include "version.h"
+#include "switching.h"
+#include "hotkey.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -51,12 +57,20 @@ struct GameProfile {
     double brightness=100.0, contrast=100.0, gamma=1.00;
     bool enabled=true;
     std::vector<DisplayProfileValues> displayProfiles;
+    // Hotkey trigger in canonical text form (see hotkey.h); empty = none.
+    // Text that does not parse is kept verbatim and shown as unavailable.
+    std::wstring hotkey;
+    // Runtime identity for the switching module and hotkey registration.
+    // Assigned at load or add, never persisted. Names are not identities.
+    unsigned uid=0;
 };
 struct Settings {
     GameProfile desktop{L"Windows",L"",L"",50,0,100.0,100.0,1.00,true}; // default values for new Windows monitor profiles
     std::vector<GameProfile> desktopProfiles;
     std::vector<GameProfile> profiles;
     bool startWindows=false, startMinimized=false, minimizeToTray=false, checkUpdates=true;
+    // Application-wide reset hotkey in canonical text form; empty = unbound (the default).
+    std::wstring resetHotkey;
 };
 
 constexpr COLORREF C_BACK=RGB(10,13,16), C_PANEL=RGB(18,22,26), C_PANEL2=RGB(24,29,34), C_FIELD=RGB(20,24,28), C_BORDER=RGB(45,52,59);
@@ -67,17 +81,17 @@ constexpr UINT WM_UPDATE_AVAILABLE=WM_APP+2;
 constexpr UINT WM_SHOW_EXISTING_INSTANCE=WM_APP+3;
 constexpr wchar_t INSTANCE_MUTEX_NAME[]=L"Local\\NvProfileSwitcher_SingleInstance";
 constexpr wchar_t APP_VERSION[]=NVPS_VERSION_WSTR;
-constexpr wchar_t APP_URL[]=L"https://github.com/mgcarnevali/NvProfileSwitcher";
+constexpr wchar_t APP_URL[]=L"https://github.com/GastonJetpacks/NvProfileSwitcher";
 constexpr wchar_t SUPPORT_URL[]=L"https://ko-fi.com/mgcarnevali";
 constexpr wchar_t UPDATE_HOST[]=L"api.github.com";
-constexpr wchar_t UPDATE_PATH[]=L"/repos/mgcarnevali/NvProfileSwitcher/releases/latest";
-enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT};
+constexpr wchar_t UPDATE_PATH[]=L"/repos/GastonJetpacks/NvProfileSwitcher/releases/latest";
+enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR,IDC_LBL_RESET_HOTKEY,IDC_RESET_HOTKEY,IDC_RESET_HOTKEY_CLEAR,IDC_DEFAULTS};
 enum {ID_TRAY_OPEN=2001,ID_TRAY_CHECK_UPDATE,ID_TRAY_ABOUT,ID_TRAY_EXIT};
 
 HINSTANCE gInst{}; HWND gWnd{}; HFONT gFont{},gFontBold{},gFontTitle{},gIconFont{}; HBRUSH gBackBrush{},gPanelBrush{},gPanel2Brush{},gFieldBrush{}; HICON gIcon{};
 ULONG_PTR gGdiPlusToken{}; Gdiplus::Image* gHeaderImage{};
 Gdiplus::Image *gSliderBrightness{},*gSliderContrast{},*gSliderGamma{},*gSliderVibrance{},*gSliderHue{},*gNvidiaDriverIcon{};
-Settings gSettings; int gSelected=-1; bool gReallyExit=false; std::wstring gActive=L"Windows", gStatus=L"Not initialized", gDriverVersion=L"--"; bool gStatusOk=false;
+Settings gSettings; int gSelected=-1; bool gReallyExit=false; switching::State gSwitching; unsigned gNextProfileUid=1; std::mutex gNvApplyMutex; /* serialises NVAPI apply calls between the UI thread and the preview worker */ std::wstring gStatus=L"Not initialized", gDriverVersion=L"--"; bool gStatusOk=false;
 NOTIFYICONDATAW gNid{}; HMENU gTrayMenu{};
 HWND gFooterHover{};
 
@@ -186,6 +200,8 @@ GameProfile ParseProfile(const std::string&o){
     p.contrast=FieldN(o,"Contrast",100.0);
     p.gamma=FieldN(o,"Gamma",1.0);
     p.enabled=FieldB(o,"Enabled",true);
+    p.hotkey=Unescape(FieldS(o,"Hotkey",""));
+    if(std::wstring c=hotkey::Canonical(p.hotkey);!c.empty()) p.hotkey=c; // canonical once; unparseable text kept verbatim
 
     size_t dp=o.find("\"Display Profiles\"");
     if(dp!=std::string::npos){
@@ -310,6 +326,7 @@ void Save(){
          <<"      \"DigitalVibrance\": "<<p.vibrance<<",\n"
          <<"      \"Hue\": "<<p.hue<<",\n"
          <<"      \"Enabled\": "<<(p.enabled?"true":"false")<<",\n"
+         <<"      \"Hotkey\": \""<<Escape(p.hotkey)<<"\",\n"
          <<"      \"Display Profiles\": [\n";
         for(size_t j=0;j<p.displayProfiles.size();++j){
             dumpDisplay(p.displayProfiles[j],8);
@@ -324,7 +341,8 @@ void Save(){
 
     f<<"  ],\n  \"StartWithWindows\": "<<(gSettings.startWindows?"true":"false")
      <<",\n  \"StartMinimized\": "<<(gSettings.startMinimized?"true":"false")
-     <<",\n  \"MinimizeToTray\": "<<(gSettings.minimizeToTray?"true":"false")<<",\n  \"CheckForUpdates\": "<<(gSettings.checkUpdates?"true":"false")<<"\n}\n";
+     <<",\n  \"MinimizeToTray\": "<<(gSettings.minimizeToTray?"true":"false")<<",\n  \"CheckForUpdates\": "<<(gSettings.checkUpdates?"true":"false")
+     <<",\n  \"ResetHotkey\": \""<<Escape(gSettings.resetHotkey)<<"\"\n}\n";
 }
 void Load(){
     std::string s=ReadAll(AppDataFile());
@@ -333,6 +351,8 @@ void Load(){
     gSettings.startMinimized=FieldB(s,"StartMinimized",false);
     gSettings.minimizeToTray=FieldB(s,"MinimizeToTray",false);
     gSettings.checkUpdates=FieldB(s,"CheckForUpdates",true);
+    gSettings.resetHotkey=Unescape(FieldS(s,"ResetHotkey",""));
+    if(std::wstring c=hotkey::Canonical(gSettings.resetHotkey);!c.empty()) gSettings.resetHotkey=c;
 
     size_t wp=s.find("\"Windows Profiles\"");
     if(wp!=std::string::npos){
@@ -352,7 +372,7 @@ void Load(){
         size_t a=s.find('[',pr), b=FindMatchingJson(s,a,'[',']');
         if(a!=std::string::npos&&b!=std::string::npos){
             for(const auto& obj:JsonObjectsInArray(s,a,b))
-                gSettings.profiles.push_back(ParseProfile(obj));
+                {GameProfile p=ParseProfile(obj);p.uid=gNextProfileUid++;gSettings.profiles.push_back(p);}
         }
     }
 }
@@ -584,6 +604,7 @@ bool Apply(const GameProfile&p){
     if(!t || !t->handle || !t->displayId){
         gStatus=L"Selected NVIDIA display is not available";gStatusOk=false;InvalidateRect(gWnd,nullptr,FALSE);return false;
     }
+    std::lock_guard<std::mutex> nv(gNvApplyMutex);
     DVCINFOEX d{};
     d.version=(unsigned int)(sizeof(d)|(1u<<16));
     if(pGetDvc(t->handle,0,&d)!=0){gStatus=L"Could not read Digital Vibrance";gStatusOk=false;InvalidateRect(gWnd,nullptr,FALSE);return false;}
@@ -613,28 +634,135 @@ std::wstring ForegroundProcessName(){
     CloseHandle(hp);
     return name;
 }
+// Adapter between the settings globals and the pure switching module. Profiles
+// are identified by their runtime id, never by name: names may repeat, and a
+// user may name a profile "Windows".
+std::wstring ProfileId(const GameProfile& p){ return std::to_wstring(p.uid); }
+const GameProfile* ProfileById(const std::wstring& id){
+    for(const auto& p:gSettings.profiles) if(ProfileId(p)==id) return &p;
+    return nullptr;
+}
+std::vector<switching::ProfileInfo> SwitchingProfiles(){
+    std::vector<switching::ProfileInfo> out;
+    out.reserve(gSettings.profiles.size());
+    for(const auto& p:gSettings.profiles)
+        out.push_back({ProfileId(p),p.exePath.empty()?std::wstring():ProcessName(p.exePath),p.enabled});
+    return out;
+}
+// Name shown for the active profile in the footer.
+std::wstring ActiveProfileName(){
+    if(gSwitching.activeId==switching::kWindowsId) return L"Windows";
+    if(const auto* p=ProfileById(gSwitching.activeId)) return p->name;
+    return L"Windows";
+}
+void PerformSwitchingAction(const switching::Action& a){
+    switch(a.kind){
+    case switching::ActionKind::ApplyProfile:
+        if(const auto* p=ProfileById(a.profileId)) ApplyGameProfile(*p);
+        break;
+    case switching::ActionKind::RestoreWindows:
+        // Restore every configured Windows display so each monitor returns
+        // to its own saved desktop values.
+        RestoreAllDesktopProfiles();
+        break;
+    case switching::ActionKind::None:
+        break;
+    }
+}
+void DispatchSwitching(const switching::Event& e){
+    switching::Decision d=switching::Decide(gSwitching,SwitchingProfiles(),e);
+    bool changed=d.state.activeId!=gSwitching.activeId||d.state.overrideActive!=gSwitching.overrideActive;
+    gSwitching=d.state;
+    PerformSwitchingAction(d.action);
+    if(changed&&gWnd) InvalidateRect(gWnd,nullptr,FALSE);
+}
 void CheckProcesses(){
-    std::wstring fgName=ForegroundProcessName();
-    GameProfile* hit=nullptr;
-    for(auto& p:gSettings.profiles){
-        if(!p.enabled||p.exePath.empty())continue;
-        if(_wcsicmp(ProcessName(p.exePath).c_str(),fgName.c_str())==0){
-            hit=&p;
-            break;
+    DispatchSwitching(switching::Event::ForegroundChanged(ForegroundProcessName()));
+}
+
+// Hotkey trigger registration. Every enabled profile with a hotkey is
+// registered with RegisterHotKey (never a low-level keyboard hook) under an id
+// derived from the profile's runtime id, so a WM_HOTKEY already queued when
+// the set is rebuilt still resolves to the profile it was pressed for. The
+// whole set is re-registered after any profile change. A hotkey Windows
+// rejects, or one that does not parse, is unavailable; it stays saved and is
+// retried on the next pass.
+struct RegisteredHotkey{int id; std::wstring profileId; bool registered;}; // profileId empty = reset hotkey
+std::vector<RegisteredHotkey> gHotkeys;
+constexpr int RESET_HOTKEY_ID=99;
+constexpr int HOTKEY_ID_BASE=100;
+int HotkeyIdFor(const GameProfile& p){ return HOTKEY_ID_BASE+(int)p.uid; }
+bool HotkeyTextParses(const std::wstring& text){ return text.empty()||!hotkey::Canonical(text).empty(); }
+void UnregisterAllHotkeys(){
+    for(const auto& h:gHotkeys) if(h.registered) UnregisterHotKey(gWnd,h.id);
+    gHotkeys.clear();
+}
+void RegisterAllHotkeys(){
+    if(!gWnd) return;
+    UnregisterAllHotkeys();
+    if(!gSettings.resetHotkey.empty()){
+        bool ok=false;
+        if(auto hk=hotkey::Parse(gSettings.resetHotkey)){
+            ok=RegisterHotKey(gWnd,RESET_HOTKEY_ID,hk->modifiers|MOD_NOREPEAT,hk->key)!=0;
         }
+        gHotkeys.push_back({RESET_HOTKEY_ID,L"",ok});
     }
-    std::wstring next=hit?hit->name:L"Windows";
-    if(next!=gActive){
-        if(hit){
-            ApplyGameProfile(*hit);
-        }else{
-            // Restore every configured Windows display so each monitor returns
-            // to its own saved desktop values.
-            RestoreAllDesktopProfiles();
+    for(const auto& p:gSettings.profiles){
+        if(!p.enabled||p.hotkey.empty()) continue;
+        bool ok=false;
+        if(auto hk=hotkey::Parse(p.hotkey)){
+            ok=RegisterHotKey(gWnd,HotkeyIdFor(p),hk->modifiers|MOD_NOREPEAT,hk->key)!=0;
         }
-        gActive=next;
-        InvalidateRect(gWnd,nullptr,FALSE);
+        gHotkeys.push_back({HotkeyIdFor(p),ProfileId(p),ok});
     }
+    InvalidateRect(gWnd,nullptr,FALSE);
+}
+const RegisteredHotkey* HotkeyById(int id){
+    for(const auto& h:gHotkeys) if(h.id==id) return &h;
+    return nullptr;
+}
+// A stored hotkey is unavailable when it does not parse (so it is never
+// registered) or when Windows refused to register it. A disabled profile's
+// parseable hotkey is simply not registered, which is not "unavailable".
+bool HotkeyUnavailable(const GameProfile& p){
+    if(p.hotkey.empty()) return false;
+    if(!HotkeyTextParses(p.hotkey)) return true;
+    for(const auto& h:gHotkeys) if(h.id!=RESET_HOTKEY_ID&&h.profileId==ProfileId(p)) return !h.registered;
+    return false;
+}
+bool ResetHotkeyUnavailable(){
+    if(gSettings.resetHotkey.empty()) return false;
+    if(!HotkeyTextParses(gSettings.resetHotkey)) return true;
+    if(const auto* h=HotkeyById(RESET_HOTKEY_ID)) return !h->registered;
+    return false;
+}
+bool AnyHotkeyUnavailable(){
+    if(ResetHotkeyUnavailable()) return true;
+    for(const auto& p:gSettings.profiles) if(HotkeyUnavailable(p)) return true;
+    return false;
+}
+// Who already uses this hotkey text: empty if nobody, otherwise a phrase for
+// the conflict message. `except` skips the profile being saved. Stored text is
+// canonical (or unparseable), so plain equality is the right comparison.
+std::wstring HotkeyOwner(const std::wstring& text,const GameProfile* except,bool includeReset){
+    if(text.empty()) return L"";
+    for(const auto& p:gSettings.profiles){
+        if(&p==except) continue;
+        if(p.hotkey==text) return L"the profile \""+p.name+L"\"";
+    }
+    if(includeReset&&gSettings.resetHotkey==text) return L"the reset hotkey";
+    return L"";
+}
+void ShowHotkeyConflict(const std::wstring& text,const std::wstring& owner){
+    std::wstring msg=L"The hotkey "+text+L" is already used by "+owner+L".\n\nChoose a different hotkey, or clear the other one first.";
+    MessageBoxW(gWnd,msg.c_str(),L"Hotkey already in use",MB_OK|MB_ICONWARNING);
+}
+// Persist profiles, re-register hotkeys, and let the switching module react
+// (for example ending an override whose profile was disabled or removed).
+void CommitProfileChanges(){
+    Save();
+    RegisterAllHotkeys();
+    DispatchSwitching(switching::Event::ProfilesChanged());
 }
 void SetStartup(bool on){
     HKEY k;
@@ -679,11 +807,232 @@ void LoadValuesToSliders(const DisplayProfileValues& v){
     RedrawAllSliders();
 }
 
+// ---- Live preview ---------------------------------------------------------
+// Preview: unsaved slider values applied to the selected display while a
+// profile is being edited. It never becomes the active profile. Discarding a
+// preview re-applies the real state (the active profile, or Windows).
+//
+// NVAPI calls take tens of milliseconds each and would stall the trackbar if
+// they ran on the UI thread, so previews go to a worker thread. The worker
+// always applies the most recent request (intermediate drag positions are
+// dropped) and only touches the controls whose values changed since its last
+// apply. All NVAPI apply calls, from either thread, are serialised by
+// gNvApplyMutex. A generation counter lets the UI thread cancel a preview that
+// is still queued or in flight, so a discard or save can never be overwritten
+// by a stale preview.
+struct PreviewRequest{ DisplayProfileValues values; void* handle=nullptr; unsigned displayId=0; unsigned generation=0; bool pending=false; };
+std::mutex gPreviewMutex; std::condition_variable gPreviewCv; PreviewRequest gPreviewReq; bool gPreviewQuit=false; std::thread gPreviewThread;
+std::atomic<unsigned> gPreviewGeneration{0}; // bumped by the UI thread to invalidate outstanding previews
+bool gPreviewDirty=false;                    // UI thread only: a preview may be on screen
+
+DisplayProfileValues SliderValues(){
+    DisplayProfileValues v;
+    v.vibrance=(int)SendMessageW(H(IDC_VIB),TBM_GETPOS,0,0);
+    v.hue=(int)SendMessageW(H(IDC_HUE),TBM_GETPOS,0,0);
+    v.brightness=(double)(int)SendMessageW(H(IDC_BRI),TBM_GETPOS,0,0);
+    v.contrast=(double)(int)SendMessageW(H(IDC_CON),TBM_GETPOS,0,0);
+    v.gamma=(int)SendMessageW(H(IDC_GAM),TBM_GETPOS,0,0)/100.0;
+    return v;
+}
+// NVAPI only, no UI state. `last` is the previous apply on the same target so
+// unchanged controls are skipped; nullptr applies everything.
+bool ApplyValuesToTarget(void* handle,unsigned displayId,const DisplayProfileValues& v,const DisplayProfileValues* last){
+    if(!pSetDvc||!pGetDvc||!pSetHue||!pSetTargetGamma||!handle||!displayId) return false;
+    if(!last||last->vibrance!=v.vibrance){
+        DVCINFOEX d{}; d.version=(unsigned int)(sizeof(d)|(1u<<16));
+        if(pGetDvc(handle,0,&d)!=0) return false;
+        d.currentLevel=std::clamp(DvcRawFromPercent(v.vibrance,d),d.minLevel,d.maxLevel);
+        if(pSetDvc(handle,0,&d)!=0) return false;
+    }
+    if(!last||last->hue!=v.hue){
+        unsigned int hue=(unsigned int)(((v.hue%360)+360)%360);
+        if(pSetHue(handle,0,hue)!=0) return false;
+    }
+    if(!last||last->brightness!=v.brightness||last->contrast!=v.contrast||last->gamma!=v.gamma){
+        if(!SetNvGamma(displayId,v.brightness,v.contrast,v.gamma)) return false;
+    }
+    return true;
+}
+void PreviewWorker(){
+    DisplayProfileValues last; bool haveLast=false; unsigned lastGeneration=0;
+    for(;;){
+        PreviewRequest req;
+        {
+            std::unique_lock<std::mutex> lk(gPreviewMutex);
+            gPreviewCv.wait(lk,[]{return gPreviewReq.pending||gPreviewQuit;});
+            if(gPreviewQuit) return;
+            req=gPreviewReq; gPreviewReq.pending=false;
+        }
+        std::lock_guard<std::mutex> nv(gNvApplyMutex);
+        if(req.generation!=gPreviewGeneration.load()) continue; // cancelled while queued
+        // The cache is only valid within one preview session (one generation).
+        const bool sameSession=haveLast&&lastGeneration==req.generation;
+        if(ApplyValuesToTarget(req.handle,req.displayId,req.values,sameSession?&last:nullptr)){
+            last=req.values; haveLast=true; lastGeneration=req.generation;
+        }else{
+            haveLast=false;
+        }
+    }
+}
+void RequestPreview(){
+    int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);
+    if(ds<0||ds>=(int)gDisplays.size()) return;
+    if(!gPreviewThread.joinable()) gPreviewThread=std::thread(PreviewWorker);
+    {
+        std::lock_guard<std::mutex> lk(gPreviewMutex);
+        gPreviewReq.values=SliderValues();
+        gPreviewReq.values.displayName=gDisplays[ds].gdiName;
+        gPreviewReq.handle=gDisplays[ds].handle;
+        gPreviewReq.displayId=gDisplays[ds].displayId;
+        gPreviewReq.generation=gPreviewGeneration.load();
+        gPreviewReq.pending=true;
+    }
+    gPreviewCv.notify_one();
+    gPreviewDirty=true;
+}
+// Any queued or in-flight preview becomes stale. Call before applying the
+// real state so the worker cannot overwrite it afterwards.
+void CancelPendingPreview(){
+    ++gPreviewGeneration;
+    std::lock_guard<std::mutex> lk(gPreviewMutex);
+    gPreviewReq.pending=false;
+}
+void StopPreviewWorker(){
+    { std::lock_guard<std::mutex> lk(gPreviewMutex); gPreviewQuit=true; }
+    gPreviewCv.notify_one();
+    if(gPreviewThread.joinable()) gPreviewThread.join();
+}
+void ReapplyActive(){
+    if(gSwitching.activeId!=switching::kWindowsId){
+        if(const auto* p=ProfileById(gSwitching.activeId)){ ApplyGameProfile(*p); return; }
+    }
+    RestoreAllDesktopProfiles();
+}
+void DiscardPreview(){
+    CancelPendingPreview();
+    if(!gPreviewDirty) return;
+    gPreviewDirty=false;
+    ReapplyActive();
+}
+void ResetSlidersToDefaults(){
+    LoadValuesToSliders(DisplayProfileValues{}); // the struct defaults are the driver-neutral values
+    RequestPreview();
+}
+
 DisplayProfileValues ValuesFromFlatProfile(const GameProfile& p){
     return {p.displayName,p.vibrance,p.hue,p.brightness,p.contrast,p.gamma};
 }
 bool IsDesktopSelected(){return gSelected==0;}
 GameProfile* SelectedProfile(){ if(gSelected==0)return CurrentDesktopProfile(); int i=gSelected-1; return (i>=0&&i<(int)gSettings.profiles.size())?&gSettings.profiles[i]:nullptr; }
+
+// ---- Hotkey capture field -------------------------------------------------
+// An owner-drawn button that records the next key press. Clicking it (or
+// pressing Space while it has focus) starts recording; the next non-modifier
+// key, with whatever modifiers are held, becomes the hotkey. Escape on its own
+// cancels; losing focus cancels. A combination that is currently registered
+// arrives as WM_HOTKEY instead of a key-down, so the main window forwards it
+// to RecordHotkey while a recording is in progress; registrations are never
+// touched by the field itself.
+constexpr WORD HKN_CHANGED=0x0100; // WM_COMMAND notification code: the field's hotkey changed
+struct HotkeyCaptureState{ HWND recording=nullptr; HWND swallowKeyUp=nullptr; std::wstring previous; } gCapture;
+void NotifyHotkeyFieldChanged(HWND h){
+    // Posted rather than sent so a conflict message appears after the key-up
+    // has been delivered, keeping the swallow flag consistent.
+    PostMessageW(gWnd,WM_COMMAND,MAKEWPARAM(GetDlgCtrlID(h),HKN_CHANGED),(LPARAM)h);
+}
+void StopHotkeyRecording(bool commit){
+    HWND h=gCapture.recording;
+    if(!h) return;
+    gCapture.recording=nullptr;
+    if(!commit) SetWindowTextW(h,gCapture.previous.c_str());
+    InvalidateRect(h,nullptr,TRUE);
+    if(commit) NotifyHotkeyFieldChanged(h);
+}
+void StartHotkeyRecording(HWND h){
+    if(gCapture.recording==h) return;
+    StopHotkeyRecording(false);
+    gCapture.recording=h;
+    gCapture.swallowKeyUp=nullptr;
+    gCapture.previous=GetTxt(GetDlgCtrlID(h));
+    SetFocus(h);
+    InvalidateRect(h,nullptr,TRUE);
+}
+// Commit the pressed combination to the recording field. Called from the
+// field's WM_KEYDOWN or from the main window's WM_HOTKEY. Returns false when
+// the key is not recordable, in which case recording continues.
+bool RecordHotkey(unsigned mods,unsigned vk){
+    HWND h=gCapture.recording;
+    if(!h) return false;
+    std::wstring text=hotkey::Format(hotkey::Hotkey{mods,vk});
+    if(text.empty()) return false;
+    SetWindowTextW(h,text.c_str());
+    gCapture.swallowKeyUp=h; // the matching key-up must not click the button
+    StopHotkeyRecording(true);
+    return true;
+}
+void ClearHotkeyField(int id){
+    HWND h=H(id);
+    if(gCapture.recording==h) StopHotkeyRecording(false);
+    gCapture.swallowKeyUp=nullptr;
+    SetWindowTextW(h,L"");
+    InvalidateRect(h,nullptr,TRUE);
+    NotifyHotkeyFieldChanged(h);
+}
+// Application Settings save on interaction, so a recorded or cleared reset
+// hotkey is persisted and registered at once. A conflict with a profile's
+// hotkey reverts the field and names the profile.
+void CommitResetHotkey(){
+    const std::wstring text=GetTxt(IDC_RESET_HOTKEY); // canonical, empty, or the stored unparseable text
+    if(std::wstring owner=HotkeyOwner(text,nullptr,false);!owner.empty()){
+        Txt(IDC_RESET_HOTKEY,gSettings.resetHotkey);
+        InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
+        ShowHotkeyConflict(text,owner);
+        return;
+    }
+    gSettings.resetHotkey=text;
+    Save();
+    RegisterAllHotkeys();
+    InvalidateRect(H(IDC_RESET_HOTKEY),nullptr,TRUE);
+}
+bool IsModifierKey(UINT vk){
+    return vk==VK_SHIFT||vk==VK_CONTROL||vk==VK_MENU||vk==VK_LWIN||vk==VK_RWIN||
+           vk==VK_LSHIFT||vk==VK_RSHIFT||vk==VK_LCONTROL||vk==VK_RCONTROL||vk==VK_LMENU||vk==VK_RMENU;
+}
+LRESULT CALLBACK HotkeyFieldSubclassProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR subclassId,DWORD_PTR){
+    const bool recording=(gCapture.recording==hwnd);
+    switch(msg){
+    case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
+    case WM_KEYDOWN: case WM_SYSKEYDOWN:{
+        if(!recording) break;
+        UINT vk=(UINT)wp;
+        if(IsModifierKey(vk)) return 0;
+        unsigned mods=0;
+        if(GetKeyState(VK_CONTROL)&0x8000) mods|=hotkey::kCtrl;
+        if(GetKeyState(VK_SHIFT)&0x8000) mods|=hotkey::kShift;
+        if(GetKeyState(VK_MENU)&0x8000) mods|=hotkey::kAlt;
+        if((GetKeyState(VK_LWIN)&0x8000)||(GetKeyState(VK_RWIN)&0x8000)) mods|=hotkey::kWin;
+        if(vk==VK_ESCAPE&&mods==0){ StopHotkeyRecording(false); return 0; }
+        RecordHotkey(mods,vk); // unsupported key: keeps recording
+        return 0;
+    }
+    case WM_KEYUP: case WM_SYSKEYUP:
+        if(recording) return 0;
+        if(gCapture.swallowKeyUp==hwnd){ gCapture.swallowKeyUp=nullptr; return 0; }
+        break;
+    case WM_CHAR: case WM_SYSCHAR:
+        if(recording) return 0;
+        break;
+    case WM_KILLFOCUS:
+        gCapture.swallowKeyUp=nullptr; // a key-up that went elsewhere must not leave a stale flag
+        if(recording) StopHotkeyRecording(false);
+        break;
+    case WM_NCDESTROY:
+        if(gCapture.recording==hwnd) gCapture.recording=nullptr;
+        RemoveWindowSubclass(hwnd,HotkeyFieldSubclassProc,subclassId);
+        break;
+    }
+    return DefSubclassProc(hwnd,msg,wp,lp);
+}
 
 void SetDesktopUi(bool desktop){
     RECT r; GetClientRect(gWnd,&r);
@@ -692,7 +1041,7 @@ void SetDesktopUi(bool desktop){
     int rightW=r.right-rightX-margin-22;
 
     int showGame=desktop?SW_HIDE:SW_SHOW;
-    for(int id:{IDC_LBL_NAME,IDC_NAME,IDC_LBL_EXE,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_LBL_ENABLED})
+    for(int id:{IDC_LBL_NAME,IDC_NAME,IDC_LBL_EXE,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_LBL_ENABLED,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR})
         ShowWindow(H(id),showGame);
     ShowWindow(H(IDC_REMOVE),desktop?SW_HIDE:SW_SHOW);
 
@@ -721,6 +1070,7 @@ void SetDesktopUi(bool desktop){
     }
 
     MoveWindow(H(IDC_SAVE),rightX+rightW-110,ySave-3,110,32,TRUE);
+    MoveWindow(H(IDC_DEFAULTS),rightX+rightW-232,ySave-3,110,32,TRUE);
 
     // Global startup options stay at the bottom of the right panel.
     // Global options in two balanced rows.
@@ -737,6 +1087,8 @@ void SetDesktopUi(bool desktop){
     InvalidateRect(gWnd,nullptr,TRUE);
 }
 void LoadSelected(){
+    StopHotkeyRecording(false);
+    DiscardPreview();
     int i=(int)SendMessageW(H(IDC_LIST),LB_GETCURSEL,0,0);
     if(i<0||i>(int)gSettings.profiles.size())return;
     gSelected=i;
@@ -781,6 +1133,8 @@ void LoadSelected(){
     Txt(IDC_NAME,p->name);
     Txt(IDC_EXE,p->exePath);
     SendMessageW(H(IDC_ENABLED),BM_SETCHECK,p->enabled?BST_CHECKED:BST_UNCHECKED,0);
+    Txt(IDC_HOTKEY,p->hotkey);
+    InvalidateRect(H(IDC_HOTKEY),nullptr,TRUE);
 
     if(ds>=0&&ds<(int)gDisplays.size())
         LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,gDisplays[ds].gdiName));
@@ -803,16 +1157,29 @@ void SaveSelected(){
         p->gamma=(int)SendMessageW(H(IDC_GAM),TBM_GETPOS,0,0)/100.0;
         Save();
         RefreshList();
+        CancelPendingPreview();
+        gPreviewDirty=false; // the saved values are now the real ones
         Apply(*p);
-        gActive=L"Windows";
+        // If a profile is active (pinned or automatic) it stays on screen; the
+        // new Windows values show when it ends.
+        if(gSwitching.activeId!=switching::kWindowsId) ReapplyActive();
         return;
     }
 
     GameProfile* p=SelectedProfile();
     if(!p)return;
+
+    // Hotkey conflicts block the save before anything is changed.
+    const std::wstring hotkeyText=GetTxt(IDC_HOTKEY); // canonical, empty, or the stored unparseable text
+    if(std::wstring owner=HotkeyOwner(hotkeyText,p,true);!owner.empty()){
+        ShowHotkeyConflict(hotkeyText,owner);
+        return;
+    }
+
     p->name=GetTxt(IDC_NAME);
     p->exePath=GetTxt(IDC_EXE);
     p->enabled=SendMessageW(H(IDC_ENABLED),BM_GETCHECK,0,0)==BST_CHECKED;
+    p->hotkey=hotkeyText;
 
     if(ds>=0&&ds<(int)gDisplays.size()){
         p->displayName=gDisplays[ds].gdiName;
@@ -831,13 +1198,21 @@ void SaveSelected(){
         p->gamma=v->gamma;
     }
 
-    Save();
+    CommitProfileChanges();
     RefreshList();
 
-    std::wstring fg=ForegroundProcessName();
-    if(!p->exePath.empty()&&_wcsicmp(ProcessName(p->exePath).c_str(),fg.c_str())==0){
+    CancelPendingPreview();
+    const bool previewed=gPreviewDirty;
+    gPreviewDirty=false; // the saved values are now the real ones
+    if(ProfileId(*p)==gSwitching.activeId){
+        // The active profile's values changed: show them now.
         ApplyGameProfile(*p);
-        gActive=p->name;
+    }else{
+        // A preview of an inactive profile must not linger on screen.
+        if(previewed) ReapplyActive();
+        // Let automatic switching pick the profile up if its executable is
+        // already in the foreground (no effect during an override).
+        DispatchSwitching(switching::Event::ForegroundChanged(ForegroundProcessName()));
     }
 }
 HICON LoadExeIcon(const std::wstring& path){
@@ -979,8 +1354,9 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* d){
     SelectObject(d->hDC,buttonFont);
     GetTextExtentPoint32W(d->hDC,caption,(int)wcslen(caption),&sz);
 
-    int iconW=(id==IDC_SAVE)?0:((id==IDC_ADD||id==IDC_REMOVE)?19:20);
-    int gap=(id==IDC_SAVE)?0:6;
+    const bool textOnly=(id==IDC_SAVE||id==IDC_HOTKEY_CLEAR||id==IDC_RESET_HOTKEY_CLEAR||id==IDC_DEFAULTS);
+    int iconW=textOnly?0:((id==IDC_ADD||id==IDC_REMOVE)?19:20);
+    int gap=textOnly?0:6;
     if(id==IDC_BROWSE) gap=7;
     int total=iconW+gap+sz.cx;
     int start=r.left+((r.right-r.left)-total)/2;
@@ -997,6 +1373,52 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* d){
     int textY=cy-sz.cy/2;
     if(id==IDC_BROWSE) textY-=1;
     TextOutW(d->hDC,start+iconW+gap,textY,caption,(int)wcslen(caption));
+}
+
+// Hotkey capture field: dark field, accent border while recording or focused,
+// "Press a key..." while recording, "None" when there is no hotkey, and an
+// "(unavailable)" suffix in the danger colour when the text does not parse or
+// the saved hotkey could not be registered.
+void DrawHotkeyField(const DRAWITEMSTRUCT* d){
+    RECT r=d->rcItem;
+    const bool recording=(gCapture.recording==d->hwndItem);
+    const bool focused=(d->itemState&ODS_FOCUS)!=0;
+    FillRound(d->hDC,r,C_FIELD,(recording||focused)?C_ACCENT:C_BORDER,7);
+
+    const std::wstring text=GetTxt((int)d->CtlID);
+    std::wstring shown; COLORREF color=C_TEXT;
+    if(recording){shown=L"Press a key...";color=C_MUTED;}
+    else if(text.empty()){shown=L"None";color=C_MUTED;}
+    else shown=text;
+
+    bool unavailable=false;
+    if(!recording&&!text.empty()){
+        if(!HotkeyTextParses(text)){
+            unavailable=true; // never registered
+        }else if(d->CtlID==IDC_HOTKEY){
+            const GameProfile* p=IsDesktopSelected()?nullptr:SelectedProfile();
+            unavailable=p&&text==p->hotkey&&HotkeyUnavailable(*p); // only the saved hotkey can be unavailable
+        }else if(d->CtlID==IDC_RESET_HOTKEY){
+            unavailable=text==gSettings.resetHotkey&&ResetHotkeyUnavailable();
+        }
+    }
+
+    RECT tr=r;tr.left+=10;tr.right-=8;
+    SetBkMode(d->hDC,TRANSPARENT);SelectObject(d->hDC,gFont);
+    if(unavailable){
+        const wchar_t* suffix=L" (unavailable)";
+        SIZE ss{};GetTextExtentPoint32W(d->hDC,suffix,(int)wcslen(suffix),&ss);
+        RECT mr=tr;mr.right-=ss.cx;
+        SetTextColor(d->hDC,color);
+        DrawTextW(d->hDC,shown.c_str(),-1,&mr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        SIZE ts{};GetTextExtentPoint32W(d->hDC,shown.c_str(),(int)shown.size(),&ts);
+        RECT sr=tr;sr.left=std::min<LONG>(tr.left+ts.cx,mr.right);
+        SetTextColor(d->hDC,C_DANGER);
+        DrawTextW(d->hDC,suffix,-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    }else{
+        SetTextColor(d->hDC,color);
+        DrawTextW(d->hDC,shown.c_str(),-1,&tr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+    }
 }
 
 void DrawValueBox(const DRAWITEMSTRUCT* d){
@@ -1139,7 +1561,21 @@ void DrawSliderIcon(HDC dc,Gdiplus::Image* image,int x,int y){
 
 
 void DrawLabel(HDC dc,const wchar_t*t,int x,int y,COLORREF c,HFONT f=nullptr){ SetBkMode(dc,TRANSPARENT);SetTextColor(dc,c);SelectObject(dc,f?f:gFont);TextOutW(dc,x,y,t,(int)wcslen(t)); }
-void Fill(HDC dc,int x,int y,int w,int h,COLORREF c){HBRUSH b=CreateSolidBrush(c);RECT r{x,y,x+w,y+h};FillRect(dc,&r,b);DeleteObject(b);} 
+void Fill(HDC dc,int x,int y,int w,int h,COLORREF c){HBRUSH b=CreateSolidBrush(c);RECT r{x,y,x+w,y+h};FillRect(dc,&r,b);DeleteObject(b);}
+// Shorten text with an ellipsis so it fits in maxW pixels using the DC's current font.
+std::wstring FitText(HDC dc,const std::wstring& s,int maxW){
+    if(maxW<=0) return {};
+    SIZE sz{};GetTextExtentPoint32W(dc,s.c_str(),(int)s.size(),&sz);
+    if(sz.cx<=maxW) return s;
+    std::wstring t=s;
+    while(!t.empty()){
+        t.pop_back();
+        std::wstring c=t+L"\x2026";
+        GetTextExtentPoint32W(dc,c.c_str(),(int)c.size(),&sz);
+        if(sz.cx<=maxW) return c;
+    }
+    return {};
+} 
 
 
 void DrawProfilesPrototypeIcon(HDC dc,int x,int y){
@@ -1418,6 +1854,34 @@ void Paint(HWND w){
     Fill(dc,versionDividerX,footerY+1,1,14,C_BORDER);
     DrawLabel(dc,footerVersion.c_str(),versionDividerX+14,footerY,C_MUTED,gFont);
 
+    // Active profile indicator: "Active <name>", with "(hotkey)" while an
+    // override is in place and a warning while any hotkey failed to register.
+    {
+        SIZE versionSize{};SelectObject(dc,gFont);
+        GetTextExtentPoint32W(dc,footerVersion.c_str(),(int)footerVersion.size(),&versionSize);
+        int x=versionDividerX+14+versionSize.cx+16;
+        const int linksLeft=rc.right-284-16; // footer link buttons start at rc.right-284
+        Fill(dc,x,footerY+1,1,14,C_BORDER);
+        x+=14;
+        DrawLabel(dc,L"Active",x,footerY,C_MUTED,gFont);
+        SIZE activeLabel{};GetTextExtentPoint32W(dc,L"Active",6,&activeLabel);
+        x+=activeLabel.cx+8;
+
+        const std::wstring suffix=gSwitching.overrideActive?L" (hotkey)":L"";
+        const std::wstring warn=AnyHotkeyUnavailable()?L"hotkey unavailable":L"";
+        SIZE suffixSize{},warnSize{};
+        GetTextExtentPoint32W(dc,suffix.c_str(),(int)suffix.size(),&suffixSize);
+        GetTextExtentPoint32W(dc,warn.c_str(),(int)warn.size(),&warnSize);
+        const int reserved=suffixSize.cx+(warn.empty()?0:warnSize.cx+12);
+
+        std::wstring name=FitText(dc,ActiveProfileName(),linksLeft-x-reserved);
+        DrawLabel(dc,name.c_str(),x,footerY,C_TEXT,gFont);
+        SIZE nameSize{};GetTextExtentPoint32W(dc,name.c_str(),(int)name.size(),&nameSize);
+        x+=nameSize.cx;
+        if(!suffix.empty()){DrawLabel(dc,suffix.c_str(),x,footerY,C_ACCENT,gFont);x+=suffixSize.cx;}
+        if(!warn.empty()) DrawLabel(dc,warn.c_str(),x+12,footerY,C_DANGER,gFont);
+    }
+
     EndPaint(w,&ps);
 }
 void BuildControls(){
@@ -1432,11 +1896,17 @@ void BuildControls(){
 
     HWND lblName=Add(L"STATIC",L"Profile name",0,rightX,122,160,22,IDC_LBL_NAME);SendMessageW(lblName,WM_SETFONT,(WPARAM)gFontBold,TRUE);
     HWND eName=Add(L"EDIT",L"",WS_BORDER|ES_AUTOHSCROLL,rightX,146,rightW,28,IDC_NAME);SetWindowTheme(eName,L"DarkMode_Explorer",nullptr);
-    HWND lblExe=Add(L"STATIC",L"Game executable",0,rightX,185,160,22,IDC_LBL_EXE);SendMessageW(lblExe,WM_SETFONT,(WPARAM)gFontBold,TRUE);
+    HWND lblExe=Add(L"STATIC",L"Executable",0,rightX,185,160,22,IDC_LBL_EXE);SendMessageW(lblExe,WM_SETFONT,(WPARAM)gFontBold,TRUE);
     HWND eExe=Add(L"EDIT",L"",WS_BORDER|ES_AUTOHSCROLL,rightX,209,rightW-110,28,IDC_EXE);SetWindowTheme(eExe,L"DarkMode_Explorer",nullptr);
     Add(L"BUTTON",L"Browse...",BS_OWNERDRAW,rightX+rightW-100,204,100,36,IDC_BROWSE);
     Add(L"BUTTON",L"",BS_AUTOCHECKBOX,rightX,247,20,22,IDC_ENABLED);
     Add(L"STATIC",L"Enable automatic profile",0,rightX+25,248,205,22,IDC_LBL_ENABLED);
+
+    // Hotkey trigger, on the same row as the Enabled checkbox.
+    HWND lblHotkey=Add(L"STATIC",L"Hotkey",0,rightX+256,248,56,22,IDC_LBL_HOTKEY);SendMessageW(lblHotkey,WM_SETFONT,(WPARAM)gFontBold,TRUE);
+    HWND hotkeyField=Add(L"BUTTON",L"",BS_OWNERDRAW,rightX+316,244,rightW-316-70,28,IDC_HOTKEY);
+    SetWindowSubclass(hotkeyField,HotkeyFieldSubclassProc,1,0);
+    Add(L"BUTTON",L"Clear",BS_OWNERDRAW,rightX+rightW-62,244,62,28,IDC_HOTKEY_CLEAR);
 
     Add(L"STATIC",L"Display",0,rightX+31,278,129,22,IDC_LBL_DISPLAY);
     SendMessageW(H(IDC_LBL_DISPLAY),WM_SETFONT,(WPARAM)gFontBold,TRUE);
@@ -1458,7 +1928,8 @@ void BuildControls(){
     slider(L"Hue (\x00B0)",IDC_LBL_HUE,IDC_HUE,IDC_VALHUE,580,0,359);
 
     Add(L"BUTTON",L"Save profile",BS_OWNERDRAW,rightX+rightW-110,654,110,32,IDC_SAVE);
-    Add(L"BUTTON",L"Add game",BS_OWNERDRAW,34,r.bottom-169,110,32,IDC_ADD);
+    Add(L"BUTTON",L"Defaults",BS_OWNERDRAW,rightX+rightW-232,654,110,32,IDC_DEFAULTS);
+    Add(L"BUTTON",L"Add profile",BS_OWNERDRAW,34,r.bottom-169,110,32,IDC_ADD);
     Add(L"BUTTON",L"Remove",BS_OWNERDRAW,154,r.bottom-169,110,32,IDC_REMOVE);
 
     Add(L"BUTTON",L"",BS_AUTOCHECKBOX,rightX,r.bottom-75,20,22,IDC_STARTWIN);
@@ -1470,6 +1941,13 @@ void BuildControls(){
     Add(L"STATIC",L"Minimize to tray",0,rightX+24,r.bottom-50,135,22,0);
     Add(L"BUTTON",L"",BS_AUTOCHECKBOX,rightX+220,r.bottom-51,20,22,IDC_CHECKUPDATES);
     Add(L"STATIC",L"Check for updates",0,rightX+244,r.bottom-50,145,22,0);
+
+    // Reset hotkey, to the right of the two checkbox rows: label above, field and clear below.
+    const int resetX=rightX+425;
+    HWND lblReset=Add(L"STATIC",L"Reset hotkey",0,resetX,r.bottom-74,rightW-425,22,IDC_LBL_RESET_HOTKEY);SendMessageW(lblReset,WM_SETFONT,(WPARAM)gFontBold,TRUE);
+    HWND resetField=Add(L"BUTTON",gSettings.resetHotkey.c_str(),BS_OWNERDRAW,resetX,r.bottom-53,rightW-425-30,26,IDC_RESET_HOTKEY);
+    SetWindowSubclass(resetField,HotkeyFieldSubclassProc,1,0);
+    Add(L"BUTTON",L"\x00D7",BS_OWNERDRAW,rightX+rightW-26,r.bottom-53,26,26,IDC_RESET_HOTKEY_CLEAR);
 
     SendMessageW(H(IDC_STARTWIN),BM_SETCHECK,gSettings.startWindows?BST_CHECKED:BST_UNCHECKED,0);
     SendMessageW(H(IDC_STARTMIN),BM_SETCHECK,gSettings.startMinimized?BST_CHECKED:BST_UNCHECKED,0);
@@ -1812,7 +2290,7 @@ LRESULT CALLBACK AboutProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
         HWND version=CreateWindowExW(0,L"STATIC",ver.c_str(),WS_CHILD|WS_VISIBLE,76,48,260,22,w,nullptr,gInst,nullptr);
         SendMessageW(version,WM_SETFONT,(WPARAM)gFont,TRUE);
 
-        HWND desc=CreateWindowExW(0,L"STATIC",L"Automatic per-game NVIDIA display color profiles for Windows",
+        HWND desc=CreateWindowExW(0,L"STATIC",L"Per-application NVIDIA display color profiles for Windows",
             WS_CHILD|WS_VISIBLE,22,84,430,22,w,nullptr,gInst,nullptr);
         SendMessageW(desc,WM_SETFONT,(WPARAM)gFont,TRUE);
 
@@ -1941,9 +2419,10 @@ void ShowMain(){
 
     SetForegroundWindow(gWnd);
     BringWindowToTop(gWnd);
-} void RestoreDesktop(){RestoreAllDesktopProfiles();gActive=L"Windows";InvalidateRect(gWnd,nullptr,FALSE);}
+} void RestoreDesktop(){RestoreAllDesktopProfiles();gSwitching.activeId=switching::kWindowsId;InvalidateRect(gWnd,nullptr,FALSE);}
 LRESULT CALLBACK Proc(HWND w,UINT m,WPARAM wp,LPARAM lp){switch(m){case WM_SHOW_EXISTING_INSTANCE:ShowMain();return 0;case WM_UPDATE_AVAILABLE:ShowUpdateAvailable((UpdateInfo*)lp);return 0;case WM_CREATE:gWnd=w;BuildControls();RefreshList();LoadSelected();SetTimer(w,1,250,nullptr);return 0;case WM_SIZE:
     if(wp==SIZE_MINIMIZED){
+        DiscardPreview();
         if(gSettings.minimizeToTray){
             SetTrayIconVisible(true);
             ShowWindow(w,SW_HIDE);
@@ -1992,8 +2471,11 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         DrawValueBox(d);return TRUE;
     }
 
-    if(d->CtlID==IDC_SAVE||d->CtlID==IDC_ADD||d->CtlID==IDC_REMOVE||d->CtlID==IDC_BROWSE){
+    if(d->CtlID==IDC_SAVE||d->CtlID==IDC_ADD||d->CtlID==IDC_REMOVE||d->CtlID==IDC_BROWSE||d->CtlID==IDC_HOTKEY_CLEAR||d->CtlID==IDC_RESET_HOTKEY_CLEAR||d->CtlID==IDC_DEFAULTS){
         DrawOwnerButton(d);return TRUE;
+    }
+    if(d->CtlID==IDC_HOTKEY||d->CtlID==IDC_RESET_HOTKEY){
+        DrawHotkeyField(d);return TRUE;
     }
     if(d->CtlID==IDC_FOOT_GITHUB||d->CtlID==IDC_FOOT_SUPPORT||d->CtlID==IDC_FOOT_ABOUT){
         DrawFooterLink(d);return TRUE;
@@ -2050,7 +2532,12 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
         return TRUE;
     }
     break;
-}case WM_HSCROLL:UpdateSliderLabels();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;case IDC_ADD:{GameProfile np{};if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();Save();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);Save();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
+}case WM_HSCROLL:UpdateSliderLabels();RequestPreview();if((HWND)lp)InvalidateRect((HWND)lp,nullptr,FALSE);return 0;case WM_TIMER:CheckProcesses();return 0;case WM_COMMAND:{int id=LOWORD(wp);if(id==IDC_LIST&&HIWORD(wp)==LBN_SELCHANGE){LoadSelected();return 0;}if(id==IDC_DISPLAY&&HIWORD(wp)==CBN_SELCHANGE){DiscardPreview();int ds=(int)SendMessageW(H(IDC_DISPLAY),CB_GETCURSEL,0,0);if(ds>=0&&ds<(int)gDisplays.size()){if(IsDesktopSelected()){auto*p=EnsureDesktopProfile(gDisplays[ds].gdiName);LoadValuesToSliders(ValuesFromFlatProfile(*p));}else{auto*p=SelectedProfile();if(p){p->displayName=gDisplays[ds].gdiName;LoadValuesToSliders(*EnsureGameValuesForDisplay(*p,p->displayName));}}}return 0;}switch(id){case IDC_BROWSE:{OPENFILENAMEW o{sizeof(o)};wchar_t f[MAX_PATH]{};o.hwndOwner=w;o.lpstrFilter=L"Executables (*.exe)\0*.exe\0All files\0*.*\0";o.lpstrFile=f;o.nMaxFile=MAX_PATH;o.Flags=OFN_FILEMUSTEXIST;if(GetOpenFileNameW(&o)){Txt(IDC_EXE,f);auto* p=SelectedProfile();if(p&&!IsDesktopSelected()){p->exePath=f;InvalidateRect(H(IDC_LIST),nullptr,TRUE);}}break;}case IDC_SAVE:SaveSelected();break;
+case IDC_DEFAULTS:ResetSlidersToDefaults();break;
+case IDC_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_HOTKEY));break; // HKN_CHANGED: applied on Save
+case IDC_HOTKEY_CLEAR:ClearHotkeyField(IDC_HOTKEY);break;
+case IDC_RESET_HOTKEY:if(HIWORD(wp)==BN_CLICKED)StartHotkeyRecording(H(IDC_RESET_HOTKEY));else if(HIWORD(wp)==HKN_CHANGED)CommitResetHotkey();break;
+case IDC_RESET_HOTKEY_CLEAR:ClearHotkeyField(IDC_RESET_HOTKEY);break;case IDC_ADD:{GameProfile np{};np.uid=gNextProfileUid++;if(!gDisplays.empty()){int pi=0;for(size_t di=0;di<gDisplays.size();++di)if(gDisplays[di].primary){pi=(int)di;break;}np.displayName=gDisplays[pi].gdiName;for(const auto&d:gDisplays)np.displayProfiles.push_back(ValuesFromDesktop(d.gdiName));}gSettings.profiles.push_back(np);gSelected=(int)gSettings.profiles.size();CommitProfileChanges();RefreshList();LoadSelected();break;}case IDC_REMOVE:if(gSelected>0&&gSelected<=(int)gSettings.profiles.size()){gSettings.profiles.erase(gSettings.profiles.begin()+(gSelected-1));gSelected=std::max<int>(0,gSelected-1);CommitProfileChanges();RefreshList();LoadSelected();}break;case IDC_STARTWIN:gSettings.startWindows=SendMessageW(H(IDC_STARTWIN),BM_GETCHECK,0,0)==BST_CHECKED;SetStartup(gSettings.startWindows);Save();break;case IDC_STARTMIN:gSettings.startMinimized=SendMessageW(H(IDC_STARTMIN),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_MINTRAY:
     gSettings.minimizeToTray=SendMessageW(H(IDC_MINTRAY),BM_GETCHECK,0,0)==BST_CHECKED;
     if(!gSettings.minimizeToTray)
         SetTrayIconVisible(false);
@@ -2061,7 +2548,14 @@ case IDC_FOOT_ABOUT:ShowAbout();break;
 case ID_TRAY_OPEN:ShowMain();break;case ID_TRAY_CHECK_UPDATE:{if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,(LPVOID)1,0,nullptr))CloseHandle(h);break;}case ID_TRAY_ABOUT:ShowAbout();break;case ID_TRAY_EXIT:gReallyExit=true;DestroyWindow(w);break;}return 0;}case WM_CLOSE:
     gReallyExit=true;
     DestroyWindow(w);
-    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_DESTROY:KillTimer(w,1);SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
+    return 0;case WM_TRAY:if(lp==WM_LBUTTONDBLCLK){ShowMain();return 0;}if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){POINT p;GetCursorPos(&p);SetForegroundWindow(w);TrackPopupMenu(gTrayMenu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);return 0;}break;case WM_HOTKEY:{
+    // While a capture field is recording, a registered combination is being
+    // re-recorded: hand it to the field instead of switching profiles.
+    if(gCapture.recording){RecordHotkey(LOWORD(lp)&(MOD_ALT|MOD_CONTROL|MOD_SHIFT|MOD_WIN),HIWORD(lp));return 0;}
+    if((int)wp==RESET_HOTKEY_ID)DispatchSwitching(switching::Event::ResetHotkeyPressed());
+    else if(const auto* h=HotkeyById((int)wp))DispatchSwitching(switching::Event::HotkeyPressed(h->profileId));
+    return 0;}
+case WM_DESTROY:UnregisterAllHotkeys();KillTimer(w,1);StopPreviewWorker();SetTrayIconVisible(false);if(pUnload)pUnload();if(gNv)FreeLibrary(gNv);PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,wp,lp);} 
 
 int WINAPI wWinMain(HINSTANCE h,HINSTANCE,LPWSTR cmd,int){
 HANDLE instanceMutex=CreateMutexW(nullptr,TRUE,INSTANCE_MUTEX_NAME);
@@ -2091,7 +2585,7 @@ int mainW=mainWr.right-mainWr.left, mainH=mainWr.bottom-mainWr.top;
 int mainX=mainWork.left+((mainWork.right-mainWork.left)-mainW)/2;
 int mainY=mainWork.top+((mainWork.bottom-mainWork.top)-mainH)/2;
 SetWindowPos(gWnd,nullptr,mainX,mainY,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
-SetWindowLongPtrW(gWnd,GWLP_USERDATA,0);gTrayMenu=CreatePopupMenu();AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_OPEN,L"Open NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_CHECK_UPDATE,L"Check for updates");AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_ABOUT,L"About NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_EXIT,L"Exit");gNid.cbSize=sizeof(gNid);gNid.hWnd=gWnd;gNid.uID=1;gNid.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;gNid.uCallbackMessage=WM_TRAY;gNid.hIcon=gIcon;wcscpy_s(gNid.szTip,L"NvProfileSwitcher");gStatusOk=InitNv();if(gStatusOk){if(gSettings.desktopProfiles.empty()&&!gDisplays.empty()){DisplayTarget* pd=nullptr;for(auto&d:gDisplays)if(d.primary){pd=&d;break;}if(!pd)pd=&gDisplays.front();EnsureDesktopProfile(pd->gdiName);}EnsureAllGameDisplayProfiles();Save();if(auto* p=SelectedProfile())RefreshDisplayCombo(*p);RestoreAllDesktopProfiles();LoadSelected();}gActive=L"Windows";bool min=(wcsstr(cmd,L"--minimized")!=nullptr);
+SetWindowLongPtrW(gWnd,GWLP_USERDATA,0);gTrayMenu=CreatePopupMenu();AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_OPEN,L"Open NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_CHECK_UPDATE,L"Check for updates");AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_ABOUT,L"About NvProfileSwitcher");AppendMenuW(gTrayMenu,MF_SEPARATOR,0,nullptr);AppendMenuW(gTrayMenu,MF_STRING,ID_TRAY_EXIT,L"Exit");gNid.cbSize=sizeof(gNid);gNid.hWnd=gWnd;gNid.uID=1;gNid.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;gNid.uCallbackMessage=WM_TRAY;gNid.hIcon=gIcon;wcscpy_s(gNid.szTip,L"NvProfileSwitcher");gStatusOk=InitNv();if(gStatusOk){if(gSettings.desktopProfiles.empty()&&!gDisplays.empty()){DisplayTarget* pd=nullptr;for(auto&d:gDisplays)if(d.primary){pd=&d;break;}if(!pd)pd=&gDisplays.front();EnsureDesktopProfile(pd->gdiName);}EnsureAllGameDisplayProfiles();Save();if(auto* p=SelectedProfile())RefreshDisplayCombo(*p);DispatchSwitching(switching::Event::Startup());LoadSelected();}RegisterAllHotkeys();bool min=(wcsstr(cmd,L"--minimized")!=nullptr);
 if(min) SetTrayIconVisible(true);
 ShowWindow(gWnd,min?SW_HIDE:SW_SHOW);
 UpdateWindow(gWnd);if(gSettings.checkUpdates){if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,nullptr,0,nullptr))CloseHandle(h);}MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}DeleteObject(gFont);DeleteObject(gFontBold);DeleteObject(gFontTitle);DeleteObject(gIconFont);DeleteObject(gBackBrush);DeleteObject(gPanelBrush);DeleteObject(gPanel2Brush);DeleteObject(gFieldBrush);

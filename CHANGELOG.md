@@ -5,6 +5,22 @@ All notable changes to NvProfileSwitcher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Hotkey triggers. A profile can carry a global key combination, assigned in Profile Settings by clicking the new **Hotkey** field and pressing the keys (a modifier is optional; **Clear** unbinds). Two profiles cannot share a combination. Pressing it applies the profile to all displays and starts an **override**: executable triggers are ignored until the application restarts. Pressing the active profile's own hotkey does nothing; pressing another profile's hotkey switches to it. Disabling or removing the pinned profile ends the override.
+- A single application-wide **reset hotkey**, set in Application Settings and unbound by default, returns every display to the Windows profile and ends the override, so automatic switching resumes.
+- The footer now shows the active profile, with **(hotkey)** while an override is in place, and a warning when a hotkey could not be registered because another application owns it.
+- Live preview while editing: moving a slider applies the values to the selected display immediately. Nothing is saved until **Save profile**; selecting another profile or display, or minimizing, discards the preview and restores the real colours.
+- A **Defaults** button next to **Save profile** returns brightness, contrast, gamma, vibrance, and hue to neutral values, previewed the same way.
+
+### Changed
+
+- This fork now identifies itself as `GastonJetpacks/NvProfileSwitcher`: the footer GitHub link, the About dialog, the update checker, and the installer URLs point at this repository instead of upstream.
+- Profiles are no longer called "games" in the interface. The **Add game** button is now **Add profile** and the **Game executable** label is now **Executable**. Existing `profiles.json` files load unchanged.
+- The switching decision (which profile becomes active when the foreground window changes) moved into a standalone module with automated tests that run in CI. No behaviour change.
+
 ## 1.2.0 — 2026-09-04
 
 ### Added

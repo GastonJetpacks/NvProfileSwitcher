@@ -1,6 +1,6 @@
 #define MyAppName "NvProfileSwitcher"
 #define MyAppPublisher "Maximiliano Carnevali"
-#define MyAppURL "https://github.com/mgcarnevali/NvProfileSwitcher"
+#define MyAppURL "https://github.com/GastonJetpacks/NvProfileSwitcher"
 #define MyAppExeName "NvProfileSwitcher.exe"
 
 #ifndef MyAppVersion

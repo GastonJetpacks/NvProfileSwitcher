@@ -1,26 +1,30 @@
 # NvProfileSwitcher
 
-**Automatic per-game NVIDIA display color profiles for Windows.**
+**Per-application NVIDIA display color profiles for Windows.**
 
 NvProfileSwitcher is a lightweight native Windows utility that automatically
 switches NVIDIA display color settings based on the application currently in
 the foreground.
 
 Configure your normal Windows colors once, create individual profiles for your
-games, and NvProfileSwitcher handles the switching automatically.
+games and applications, and NvProfileSwitcher handles the switching
+automatically.
 
-When a configured game becomes active, its color profile is applied. As soon
-as you switch back to Windows, your browser, Discord, or another application,
-your Windows profile is automatically restored.
+When a configured application becomes active, its color profile is applied. As
+soon as you switch back to Windows, your browser, Discord, or another
+application, your Windows profile is automatically restored.
+
+> This is a fork of [mgcarnevali/NvProfileSwitcher](https://github.com/mgcarnevali/NvProfileSwitcher).
+> Releases and the in-app update check come from this repository.
 
 > NvProfileSwitcher is not affiliated with, endorsed by, or sponsored by
 > NVIDIA Corporation. NVIDIA is a trademark of NVIDIA Corporation.
 
 ## Features
 
-- Automatic per-game profile switching
+- Automatic per-application profile switching
 - Automatic Windows profile restoration
-- Profiles matched by game executable (`.exe`)
+- Profiles matched by executable (`.exe`)
 - Brightness control
 - Contrast control
 - Gamma control
@@ -29,10 +33,10 @@ your Windows profile is automatically restored.
 - Per-display profiles
 - Multi-monitor support
 - Separate Windows color settings for each configured display
-- Individual game executable icons
+- Individual executable icons
 - Redesigned dark interface with dedicated Profiles, Profile Settings, and Application Settings sections
 - Integrated NVIDIA API status, driver version, and application version footer
-- Enable or disable individual game profiles
+- Enable or disable individual profiles
 - Start automatically with Windows
 - Start minimized to the system tray
 - Optional minimize-to-tray behavior
@@ -44,9 +48,9 @@ your Windows profile is automatically restored.
 
 ## Screenshots
 
-### Game Profile
+### Profile
 
-![NvProfileSwitcher Game Profile](docs/screenshots/game-profile.png)
+![NvProfileSwitcher Profile](docs/screenshots/game-profile.png)
 
 ### Windows Profile
 
@@ -103,16 +107,56 @@ Releases page.
 
 1. Launch `NvProfileSwitcher.exe`.
 2. Select **Windows** and configure your normal desktop color settings.
-3. Click **Add game**.
-4. Select the game's executable.
-5. Choose the display where the game runs.
-6. Configure the desired color settings.
-7. Click **Save profile**.
+3. Click **Add profile**.
+4. Select the application's executable.
+5. Choose the display where the application runs.
+6. Configure the desired color settings. The selected display previews every
+   change live, so you can tune by eye. Nothing is stored until you save;
+   selecting another profile or display discards the preview.
+7. Click **Save profile**. **Defaults** puts all five controls back to neutral
+   values (brightness 100, contrast 100, gamma 1.00, vibrance 50, hue 0),
+   previewed the same way.
 
-NvProfileSwitcher will now detect when that game owns the foreground window
-and automatically apply its profile.
+NvProfileSwitcher will now detect when that application owns the foreground
+window and automatically apply its profile.
 
-Switch away from the game and your Windows profile is restored automatically.
+Switch away from the application and your Windows profile is restored
+automatically.
+
+## Hotkeys
+
+Any profile can also be activated with a global key combination.
+
+1. Select the profile and click the **Hotkey** field in Profile Settings.
+2. Press the key or combination you want, for example `Ctrl+Alt+1` or `F9`.
+   A modifier key is optional.
+3. Click **Save profile**.
+
+Pressing the hotkey applies the profile to all displays, even while
+NvProfileSwitcher is minimized to the tray, and starts an **override**: the
+profile stays active and automatic switching is paused until you restart
+NvProfileSwitcher. The footer shows the active profile with **(hotkey)** while
+an override is in place. Pressing another profile's hotkey switches to that
+profile; pressing the active profile's own hotkey does nothing.
+
+Use **Clear** next to the field to remove a hotkey. Two profiles cannot share
+a combination: saving is blocked with a message naming the other profile.
+
+If another application already owns the combination, the field and the footer
+show it as unavailable. The hotkey is kept and retried the next time
+NvProfileSwitcher starts.
+
+Press **Esc** while the field says "Press a key..." to cancel without changing
+the hotkey. A key without a modifier is captured system-wide while
+NvProfileSwitcher runs, so other applications will not see it.
+
+### Reset hotkey
+
+The **Reset hotkey** field in Application Settings sets one application-wide
+combination that returns every display to the Windows profile and ends the
+override, so automatic switching resumes. It is unbound by default. Recording
+or clearing it takes effect immediately; no Save is needed. It cannot share a
+combination with a profile's hotkey.
 
 ## Color controls
 
@@ -130,15 +174,16 @@ The controls are applied directly through the NVIDIA display pipeline / NVAPI.
 
 ## Multi-monitor support
 
-NvProfileSwitcher detects available NVIDIA displays and allows Windows and game
-profiles to store independent color settings for each monitor.
+NvProfileSwitcher detects available NVIDIA displays and allows the Windows
+profile and every other profile to store independent color settings for each
+monitor.
 
 Selecting a different display shows the values saved specifically for that
 monitor.
 
-When a configured game becomes active, NvProfileSwitcher applies the saved game
-settings to the corresponding displays. When you leave the game, each monitor
-returns to its own saved Windows color profile.
+When a configured application becomes active, NvProfileSwitcher applies the
+profile's saved settings to the corresponding displays. When you leave the
+application, each monitor returns to its own saved Windows color profile.
 
 ## System tray
 
@@ -192,10 +237,10 @@ The configuration file is created automatically.
 NvProfileSwitcher monitors the application that currently owns the foreground
 window.
 
-When its executable matches an enabled game profile, the corresponding NVIDIA
+When its executable matches an enabled profile, the corresponding NVIDIA
 color settings are applied to the configured displays.
 
-When the foreground application no longer matches a configured game,
+When the foreground application no longer matches a configured profile,
 NvProfileSwitcher restores the saved Windows profiles for each display.
 
 Digital Vibrance and Hue are controlled through NVIDIA NVAPI.
@@ -251,4 +296,4 @@ Copyright © 2026 Maximiliano Carnevali.
 
 ## About
 
-**NvProfileSwitcher** — Automatic per-game NVIDIA display color profiles for Windows.
+**NvProfileSwitcher** — Per-application NVIDIA display color profiles for Windows.
