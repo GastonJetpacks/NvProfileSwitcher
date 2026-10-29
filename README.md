@@ -66,8 +66,8 @@ The interface is organized into dedicated **Profiles**, **Profile Settings**,
 and **Application Settings** sections.
 
 The footer provides at-a-glance NVIDIA API status, NVIDIA driver information,
-the running NvProfileSwitcher version, and direct access to GitHub, support,
-and application information.
+the running NvProfileSwitcher version, the active profile, and an **About**
+link with application information.
 
 ## Installation
 

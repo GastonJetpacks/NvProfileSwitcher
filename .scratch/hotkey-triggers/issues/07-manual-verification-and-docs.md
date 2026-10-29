@@ -28,3 +28,7 @@
 - [ ] An existing pre-hotkey `profiles.json` loads unchanged and gains the new fields on the next save.
 - [ ] README, CHANGELOG, and every user-visible string use `CONTEXT.md` vocabulary; no "game profile" remains.
 - [ ] CI is green with the test executable running.
+
+## Comments
+
+- **2026-09-08 (agent, second session):** No outcome for the manual pass has been reported. Evidence that the build was exercised on the dev machine (RTX 5060 Ti, two monitors): `%APPDATA%\NvProfileSwitcher\profiles.json` was saved at 18:02 with `Hotkey: F8` on the one profile and `ResetHotkey: F5`, fields only the new build writes. Per-item results are still needed from the user before this ticket can close and 1.3.0 can be tagged. Items 9 and 10 (vocabulary, CI green with tests) were verified by the previous session.
