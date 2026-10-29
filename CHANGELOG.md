@@ -17,7 +17,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- This fork now identifies itself as `GastonJetpacks/NvProfileSwitcher`: the footer GitHub link, the About dialog, the update checker, and the installer URLs point at this repository instead of upstream.
+- This fork now identifies itself as `GastonJetpacks/NvProfileSwitcher`: the About dialog, the update checker, and the installer URLs point at this repository instead of upstream.
+- The **GitHub** and **Support me** links were removed from the footer, and the **Support** button from the About dialog. The About dialog keeps its GitHub button and now shows a "Modified for Tarkov 2026 by M4dBl4ckC4t" line under the copyright.
 - Profiles are no longer called "games" in the interface. The **Add game** button is now **Add profile** and the **Game executable** label is now **Executable**. Existing `profiles.json` files load unchanged.
 - The switching decision (which profile becomes active when the foreground window changes) moved into a standalone module with automated tests that run in CI. No behaviour change.
 

@@ -82,10 +82,9 @@ constexpr UINT WM_SHOW_EXISTING_INSTANCE=WM_APP+3;
 constexpr wchar_t INSTANCE_MUTEX_NAME[]=L"Local\\NvProfileSwitcher_SingleInstance";
 constexpr wchar_t APP_VERSION[]=NVPS_VERSION_WSTR;
 constexpr wchar_t APP_URL[]=L"https://github.com/GastonJetpacks/NvProfileSwitcher";
-constexpr wchar_t SUPPORT_URL[]=L"https://ko-fi.com/mgcarnevali";
 constexpr wchar_t UPDATE_HOST[]=L"api.github.com";
 constexpr wchar_t UPDATE_PATH[]=L"/repos/GastonJetpacks/NvProfileSwitcher/releases/latest";
-enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_GITHUB,IDC_FOOT_SUPPORT,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR,IDC_LBL_RESET_HOTKEY,IDC_RESET_HOTKEY,IDC_RESET_HOTKEY_CLEAR,IDC_DEFAULTS};
+enum {IDC_LIST=1001,IDC_NAME,IDC_EXE,IDC_BROWSE,IDC_ENABLED,IDC_DISPLAY,IDC_LBL_DISPLAY,IDC_VIB,IDC_HUE,IDC_BRI,IDC_CON,IDC_GAM,IDC_SAVE,IDC_APPLY,IDC_ADD,IDC_REMOVE,IDC_RESTORE,IDC_STARTWIN,IDC_STARTMIN,IDC_VALVIB,IDC_VALHUE,IDC_VALBRI,IDC_VALCON,IDC_VALGAM,IDC_LBL_NAME,IDC_LBL_EXE,IDC_LBL_ENABLED,IDC_LBL_VIB,IDC_LBL_HUE,IDC_LBL_BRI,IDC_LBL_CON,IDC_LBL_GAM,IDC_MINTRAY,IDC_CHECKUPDATES,IDC_FOOT_ABOUT,IDC_LBL_HOTKEY,IDC_HOTKEY,IDC_HOTKEY_CLEAR,IDC_LBL_RESET_HOTKEY,IDC_RESET_HOTKEY,IDC_RESET_HOTKEY_CLEAR,IDC_DEFAULTS};
 enum {ID_TRAY_OPEN=2001,ID_TRAY_CHECK_UPDATE,ID_TRAY_ABOUT,ID_TRAY_EXIT};
 
 HINSTANCE gInst{}; HWND gWnd{}; HFONT gFont{},gFontBold{},gFontTitle{},gIconFont{}; HBRUSH gBackBrush{},gPanelBrush{},gPanel2Brush{},gFieldBrush{}; HICON gIcon{};
@@ -1716,8 +1715,7 @@ LRESULT CALLBACK FooterLinkSubclassProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
 }
 
 void DrawFooterLink(const DRAWITEMSTRUCT* d){
-    const wchar_t* text=d->CtlID==IDC_FOOT_GITHUB?L"GitHub":
-                       d->CtlID==IDC_FOOT_SUPPORT?L"Support me":L"About";
+    const wchar_t* text=L"About";
     bool down=(d->itemState&ODS_SELECTED)!=0;
     RECT r=d->rcItem;
 
@@ -1860,7 +1858,7 @@ void Paint(HWND w){
         SIZE versionSize{};SelectObject(dc,gFont);
         GetTextExtentPoint32W(dc,footerVersion.c_str(),(int)footerVersion.size(),&versionSize);
         int x=versionDividerX+14+versionSize.cx+16;
-        const int linksLeft=rc.right-284-16; // footer link buttons start at rc.right-284
+        const int linksLeft=rc.right-108-16; // the About link starts at rc.right-108
         Fill(dc,x,footerY+1,1,14,C_BORDER);
         x+=14;
         DrawLabel(dc,L"Active",x,footerY,C_MUTED,gFont);
@@ -1954,11 +1952,7 @@ void BuildControls(){
     SendMessageW(H(IDC_MINTRAY),BM_SETCHECK,gSettings.minimizeToTray?BST_CHECKED:BST_UNCHECKED,0);
     SendMessageW(H(IDC_CHECKUPDATES),BM_SETCHECK,gSettings.checkUpdates?BST_CHECKED:BST_UNCHECKED,0);
 
-    HWND footGitHub=Add(L"BUTTON",L"GitHub",BS_OWNERDRAW,r.right-284,r.bottom-23,66,20,IDC_FOOT_GITHUB);
-    HWND footSupport=Add(L"BUTTON",L"Support me",BS_OWNERDRAW,r.right-212,r.bottom-23,98,20,IDC_FOOT_SUPPORT);
     HWND footAbout=Add(L"BUTTON",L"About",BS_OWNERDRAW,r.right-108,r.bottom-23,64,20,IDC_FOOT_ABOUT);
-    SetWindowSubclass(footGitHub,FooterLinkSubclassProc,1,0);
-    SetWindowSubclass(footSupport,FooterLinkSubclassProc,1,0);
     SetWindowSubclass(footAbout,FooterLinkSubclassProc,1,0);
 }
 
@@ -1975,8 +1969,6 @@ void ResizeControls(){
     MoveWindow(H(IDC_BROWSE),rightX+rightW-100,204,100,36,TRUE);
     MoveWindow(H(IDC_ADD),34,r.bottom-169,110,32,TRUE);
     MoveWindow(H(IDC_REMOVE),154,r.bottom-169,110,32,TRUE);
-    MoveWindow(H(IDC_FOOT_GITHUB),r.right-284,r.bottom-23,66,20,TRUE);
-    MoveWindow(H(IDC_FOOT_SUPPORT),r.right-212,r.bottom-23,98,20,TRUE);
     MoveWindow(H(IDC_FOOT_ABOUT),r.right-108,r.bottom-23,64,20,TRUE);
     SetDesktopUi(IsDesktopSelected());
 }
@@ -2298,11 +2290,13 @@ LRESULT CALLBACK AboutProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
             WS_CHILD|WS_VISIBLE,22,118,350,22,w,nullptr,gInst,nullptr);
         SendMessageW(copy,WM_SETFONT,(WPARAM)gFont,TRUE);
 
-        HWND github=CreateWindowExW(0,L"BUTTON",L"GitHub",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,126,158,100,36,w,(HMENU)3001,gInst,nullptr);
+        HWND modified=CreateWindowExW(0,L"STATIC",L"Modified for Tarkov 2026 by M4dBl4ckC4t",
+            WS_CHILD|WS_VISIBLE,22,140,350,22,w,nullptr,gInst,nullptr);
+        SendMessageW(modified,WM_SETFONT,(WPARAM)gFont,TRUE);
+
+        HWND github=CreateWindowExW(0,L"BUTTON",L"GitHub",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,238,180,100,36,w,(HMENU)3001,gInst,nullptr);
         SendMessageW(github,WM_SETFONT,(WPARAM)gFontBold,TRUE);
-        HWND support=CreateWindowExW(0,L"BUTTON",L"Support",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,238,158,100,36,w,(HMENU)3002,gInst,nullptr);
-        SendMessageW(support,WM_SETFONT,(WPARAM)gFontBold,TRUE);
-        HWND close=CreateWindowExW(0,L"BUTTON",L"Close",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,350,158,100,36,w,(HMENU)IDCANCEL,gInst,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",L"Close",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,350,180,100,36,w,(HMENU)IDCANCEL,gInst,nullptr);
         SendMessageW(close,WM_SETFONT,(WPARAM)gFontBold,TRUE);
         return 0;
     }
@@ -2315,11 +2309,11 @@ LRESULT CALLBACK AboutProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
     }
     case WM_DRAWITEM:{
         auto* d=(DRAWITEMSTRUCT*)lp;
-        if(d->CtlID==3001 || d->CtlID==3002 || d->CtlID==IDCANCEL){
+        if(d->CtlID==3001 || d->CtlID==IDCANCEL){
             bool down=(d->itemState&ODS_SELECTED)!=0;
             RECT r=d->rcItem;
             FillRound(d->hDC,r,down?C_ACCENT_DARK:C_PANEL2,C_BORDER,7);
-            const wchar_t* text=d->CtlID==3001?L"GitHub":(d->CtlID==3002?L"Support":L"Close");
+            const wchar_t* text=d->CtlID==3001?L"GitHub":L"Close";
             SIZE z{};
             SelectObject(d->hDC,gFontBold);
             GetTextExtentPoint32W(d->hDC,text,(int)wcslen(text),&z);
@@ -2331,10 +2325,6 @@ LRESULT CALLBACK AboutProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
     case WM_COMMAND:
         if(LOWORD(wp)==3001){
             ShellExecuteW(w,L"open",APP_URL,nullptr,nullptr,SW_SHOWNORMAL);
-            return 0;
-        }
-        if(LOWORD(wp)==3002){
-            ShellExecuteW(w,L"open",SUPPORT_URL,nullptr,nullptr,SW_SHOWNORMAL);
             return 0;
         }
         if(LOWORD(wp)==IDCANCEL){
@@ -2375,7 +2365,7 @@ void ShowAbout(){
     }
 
     HWND a=CreateWindowExW(WS_EX_DLGMODALFRAME|WS_EX_TOPMOST,L"NvProfileSwitcherAbout",L"About NvProfileSwitcher",
-        WS_CAPTION|WS_SYSMENU,0,0,488,242,nullptr,nullptr,gInst,nullptr);
+        WS_CAPTION|WS_SYSMENU,0,0,488,264,nullptr,nullptr,gInst,nullptr);
     if(!a)return;
 
     BOOL darkTitle=TRUE;
@@ -2444,7 +2434,7 @@ case WM_NOTIFY:{
 case WM_SETCURSOR:{
     HWND target=(HWND)wp;
     int cid=GetDlgCtrlID(target);
-    if(cid==IDC_FOOT_GITHUB||cid==IDC_FOOT_SUPPORT||cid==IDC_FOOT_ABOUT){
+    if(cid==IDC_FOOT_ABOUT){
         SetCursor(LoadCursor(nullptr,IDC_HAND));
         return TRUE;
     }
@@ -2477,7 +2467,7 @@ case WM_CTLCOLORSTATIC:{HDC dc=(HDC)wp;SetTextColor(dc,C_TEXT);SetBkColor(dc,C_P
     if(d->CtlID==IDC_HOTKEY||d->CtlID==IDC_RESET_HOTKEY){
         DrawHotkeyField(d);return TRUE;
     }
-    if(d->CtlID==IDC_FOOT_GITHUB||d->CtlID==IDC_FOOT_SUPPORT||d->CtlID==IDC_FOOT_ABOUT){
+    if(d->CtlID==IDC_FOOT_ABOUT){
         DrawFooterLink(d);return TRUE;
     }
 
@@ -2542,8 +2532,7 @@ case IDC_RESET_HOTKEY_CLEAR:ClearHotkeyField(IDC_RESET_HOTKEY);break;case IDC_AD
     if(!gSettings.minimizeToTray)
         SetTrayIconVisible(false);
     Save();
-    break;case IDC_CHECKUPDATES:gSettings.checkUpdates=SendMessageW(H(IDC_CHECKUPDATES),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;case IDC_FOOT_GITHUB:ShellExecuteW(w,L"open",APP_URL,nullptr,nullptr,SW_SHOWNORMAL);break;
-case IDC_FOOT_SUPPORT:ShellExecuteW(w,L"open",SUPPORT_URL,nullptr,nullptr,SW_SHOWNORMAL);break;
+    break;case IDC_CHECKUPDATES:gSettings.checkUpdates=SendMessageW(H(IDC_CHECKUPDATES),BM_GETCHECK,0,0)==BST_CHECKED;Save();break;
 case IDC_FOOT_ABOUT:ShowAbout();break;
 case ID_TRAY_OPEN:ShowMain();break;case ID_TRAY_CHECK_UPDATE:{if(HANDLE h=CreateThread(nullptr,0,UpdateCheckThread,(LPVOID)1,0,nullptr))CloseHandle(h);break;}case ID_TRAY_ABOUT:ShowAbout();break;case ID_TRAY_EXIT:gReallyExit=true;DestroyWindow(w);break;}return 0;}case WM_CLOSE:
     gReallyExit=true;
